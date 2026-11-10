@@ -540,6 +540,12 @@ function fillTriangleCoverage(coverage, width, height, x0, y0, x1, y1, x2, y2) {
   }
 }
 
+// Pixels drawn per CSS pixel. A plain monitor gets a quarter more than it shows, which with 4x MSAA is
+// enough to keep thin chrome edges clean; 67js's default of 1.5 drew 44 % more pixels for the same picture.
+function renderPixelRatio() {
+  return Math.min(2, Math.max(1.25, window.devicePixelRatio || 1));
+}
+
 export class TurntableRenderer67 {
   constructor(canvas, options = {}) {
     this.canvas = canvas;
@@ -663,6 +669,7 @@ export class TurntableRenderer67 {
     const renderer = new Renderer67(this.canvas, parts, {
       hdr: true,
       samples: 4,
+      pixelRatio: renderPixelRatio(),
       ground: false,
       memoryBudgetMiB: 768,
       shadowBounds: shadowBoundsFor(look.lightDirection, centre, radius),
@@ -958,12 +965,14 @@ export class TurntableRenderer67 {
     const floorY = stage.definition.floorZ + 0.02;
     if (eye[1] < floorY) eye[1] = floorY;
 
-    const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
-    const width = Math.max(1, Math.floor(this.canvas.clientWidth * pixelRatio));
-    const height = Math.max(1, Math.floor(this.canvas.clientHeight * pixelRatio));
-    if (this.canvas.width !== width || this.canvas.height !== height) {
-      this.canvas.width = width;
-      this.canvas.height = height;
+    // 67js sizes the canvas itself from its own pixel ratio. Setting canvas.width here as well made the
+    // two fight: every frame the frame targets were thrown away and allocated again.
+    const width = Math.max(1, this.canvas.clientWidth);
+    const height = Math.max(1, this.canvas.clientHeight);
+    if (this.sizedRenderer !== stage.renderer || this.sizedWidth !== width || this.sizedHeight !== height) {
+      this.sizedRenderer = stage.renderer;
+      this.sizedWidth = width;
+      this.sizedHeight = height;
       stage.renderer.resize();
       if (this.activePreset === 'overview') this.cam.distGoal = this.framingDistance(this.cam.fovGoal);
     }
