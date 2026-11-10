@@ -467,7 +467,7 @@ export const MATERIALS = {
 };
 
 // --- Disc mesh with UV mapping and warp capability ---
-export function buildDiscPart(name, discTextureDescriptor, discFinishDescriptor) {
+export function buildDiscPart(name, discTextureDescriptor, discFinishDescriptor, discNormalDescriptor) {
   const b = new MeshBuilder67();
   const rRings = 44, thSegs = 128;
   const rMin = 0.0036, rMax = R_DISC;
@@ -509,6 +509,7 @@ export function buildDiscPart(name, discTextureDescriptor, discFinishDescriptor)
     roughness: discFinishDescriptor ? 1 : 0.2,
     metallic: discFinishDescriptor ? 1 : 0.14,
     metallicRoughnessMap: discFinishDescriptor,
+    normalMap: discNormalDescriptor,
     // No anisotropy: its highlight is tied to the disc and swept the whole surface white twice a turn.
     anisotropy: 0,
     iridescence: 0.36,
@@ -1248,4 +1249,203 @@ export function buildCablePart(name, pathPoints, radius, material) {
     }
   }
   return builder.toPart(name, material);
+}
+
+// --- The groove under the needle, at true scale -----------------------------------------------------------
+// A patch of record surface a few millimetres long, lying on the disc where the needle rides: flat land with
+// V-shaped grooves cut into it. The mesh is laid out in its own frame (x along the groove, y up, z towards
+// the rim) and reshaped every frame from the wall positions the simulation reads, so what is drawn is the
+// stretch of groove being played. Around it the disc carries on with its drawn grooves.
+export const GROOVE_PATCH_MARGIN = 0.0002;   // flat land kept beyond the outermost groove of the patch
+// Towards its ends and its outermost turns the grooves of the patch close up, so it has no visible border.
+const GROOVE_PATCH_FADE_COLUMNS = 0.14;      // share of the length, at each end
+const GROOVE_PATCH_FADE_ROWS = 8;
+
+// coverDescriptor: a small texture whose alpha says how much of the patch shows; the renderer fades the patch
+// in with it as the camera comes close, and its soft border lets the patch melt into the disc around it.
+export function buildGroovePatchPart(name, rows, columns, coverDescriptor) {
+  const strips = 1 + rows * 3;
+  const vertexCount = columns * strips * 2;
+  const positions = new Float32Array(vertexCount * 3);
+  const normals = new Float32Array(vertexCount * 3);
+  const uvs = new Float32Array(vertexCount * 2);
+  for (let vertex = 0; vertex < vertexCount; vertex++) {
+    normals[vertex * 3 + 1] = 1;
+    const column = Math.floor(vertex / (strips * 2));
+    const across = vertex % (strips * 2);
+    uvs[vertex * 2] = column / (columns - 1);
+    uvs[vertex * 2 + 1] = across / (strips * 2 - 1);
+  }
+  const indices = new Uint32Array((columns - 1) * strips * 6);
+  let cursor = 0;
+  for (let column = 0; column < columns - 1; column++) {
+    for (let strip = 0; strip < strips; strip++) {
+      const near = (column * strips + strip) * 2;
+      const far = ((column + 1) * strips + strip) * 2;
+      indices[cursor++] = near; indices[cursor++] = far; indices[cursor++] = far + 1;
+      indices[cursor++] = near; indices[cursor++] = far + 1; indices[cursor++] = near + 1;
+    }
+  }
+  return {
+    name,
+    geometry: { positions, normals, uvs, indices },
+    material: {
+      color: [0.005, 0.005, 0.0055],
+      roughness: 0.38,
+      metallic: 0.14,
+      doubleSided: true,
+      map: coverDescriptor,
+      alphaMode: 'blend',
+    },
+    userData: { rows, columns, strips },
+  };
+}
+
+function smoothFade(amount) {
+  const share = Math.max(0, Math.min(1, amount));
+  return share * share * (3 - 2 * share);
+}
+
+// walls: for each row and column, the inner and outer top edge of that groove in metres from the centre of
+// the groove being played (NaN where the record has no groove). Row 0 is the turn nearest the rim.
+export function shapeGroovePatch(part, walls, halfLength) {
+  const { rows, columns, strips } = part.userData;
+  const { positions, normals } = part.geometry;
+  const edges = new Float32Array(rows * 2);
+  // How far the patch reaches across the grooves, read off the column under the needle.
+  const middleColumn = Math.floor(columns / 2);
+  let lowest = 0;
+  let highest = 0;
+  for (let row = 0; row < rows; row++) {
+    const offset = (row * columns + middleColumn) * 2;
+    const inner = walls[offset];
+    const outer = walls[offset + 1];
+    if (inner === inner && inner < lowest) lowest = inner;
+    if (outer === outer && outer > highest) highest = outer;
+  }
+  lowest -= GROOVE_PATCH_MARGIN;
+  highest += GROOVE_PATCH_MARGIN;
+  for (let column = 0; column < columns; column++) {
+    const along = (column / (columns - 1) * 2 - 1) * halfLength;
+    const fromEnd = Math.min(column, columns - 1 - column) / ((columns - 1) * GROOVE_PATCH_FADE_COLUMNS);
+    const lengthFade = smoothFade(fromEnd);
+    let reach = lowest;
+    for (let order = 0; order < rows; order++) {
+      const row = rows - 1 - order;                 // later turns lie nearer the label, so they come first
+      const offset = (row * columns + column) * 2;
+      let inner = walls[offset];
+      let outer = walls[offset + 1];
+      if (!(inner === inner) || !(outer === outer) || outer < inner) inner = outer = reach;
+      const open = lengthFade * smoothFade((Math.min(row, rows - 1 - row) + 1) / GROOVE_PATCH_FADE_ROWS);
+      const centre = (inner + outer) / 2;
+      inner = centre - (centre - inner) * open;
+      outer = centre + (outer - centre) * open;
+      inner = Math.max(inner, reach);
+      outer = Math.max(outer, inner);
+      edges[order * 2] = inner;
+      edges[order * 2 + 1] = outer;
+      reach = outer;
+    }
+    let vertex = column * strips * 2 * 3;
+    const put = (radial, height, normalRadial, normalUp) => {
+      positions[vertex] = along; positions[vertex + 1] = height; positions[vertex + 2] = radial;
+      normals[vertex] = 0; normals[vertex + 1] = normalUp; normals[vertex + 2] = normalRadial;
+      vertex += 3;
+    };
+    let landStart = lowest;
+    for (let order = 0; order < rows; order++) {
+      const inner = edges[order * 2];
+      const outer = edges[order * 2 + 1];
+      const middle = (inner + outer) / 2;
+      const depth = (outer - inner) / 2;              // the cutter's walls stand at 45 degrees
+      const slope = Math.SQRT1_2;
+      put(landStart, 0, 0, 1); put(inner, 0, 0, 1);
+      put(inner, 0, slope, slope); put(middle, -depth, slope, slope);
+      put(middle, -depth, -slope, slope); put(outer, 0, -slope, slope);
+      landStart = outer;
+    }
+    put(landStart, 0, 0, 1); put(Math.max(highest, landStart), 0, 0, 1);
+  }
+}
+
+// The point of the machine's own needle. The needle the machine is built with ends a fraction of a
+// millimetre wide; this grows out of that very end, outline for outline, and narrows down to the ball of
+// 18 micrometres that rides the groove. It is built in the needle's own space and moves with the arm; only
+// its tip is moved, each frame, to where the groove holds it.
+export const STYLUS_TIP_RADIUS = 18e-6;
+const NEEDLE_POINT_NECK_HEIGHT = 12e-6;      // the last ring sits this far above the very tip
+
+// outline: the end of the needle as a closed ring of points [x, y, z] in the needle part's space.
+// material: the needle's material. textureCoordinate: where its end is painted on that material's texture.
+export function buildNeedlePointPart(name, outline, material, textureCoordinate = null) {
+  const sides = outline.length;
+  const vertexCount = sides * 7;
+  const positions = new Float32Array(vertexCount * 3);
+  const normals = new Float32Array(vertexCount * 3);
+  const indices = new Uint32Array(sides * 9);
+  for (let side = 0; side < sides; side++) {
+    const first = side * 7;
+    indices.set([first, first + 1, first + 2, first, first + 2, first + 3, first + 4, first + 5, first + 6], side * 9);
+  }
+  const geometry = { positions, normals, indices };
+  if (textureCoordinate) {
+    const uvs = new Float32Array(vertexCount * 2);
+    for (let offset = 0; offset < uvs.length; offset += 2) {
+      uvs[offset] = textureCoordinate[0];
+      uvs[offset + 1] = textureCoordinate[1];
+    }
+    geometry.uvs = uvs;
+  }
+  const centre = [0, 0, 0];
+  for (const point of outline) {
+    for (let axis = 0; axis < 3; axis++) centre[axis] += point[axis] / sides;
+  }
+  let reach = 0;
+  for (const point of outline) reach += Math.hypot(point[0] - centre[0], point[2] - centre[2]) / sides;
+  const part = {
+    name,
+    geometry,
+    material: { ...material, doubleSided: true },
+    userData: { outline, centre, neckScale: STYLUS_TIP_RADIUS / Math.max(reach, 1e-9) },
+  };
+  shapeNeedlePoint(part, [centre[0], centre[1] - 0.0003, centre[2]]);
+  return part;
+}
+
+// Moves the tip of the point to the given place, in the needle part's space.
+export function shapeNeedlePoint(part, tip) {
+  const { outline, centre, neckScale } = part.userData;
+  const { positions, normals } = part.geometry;
+  const sides = outline.length;
+  const neck = outline.map((point) => [
+    tip[0] + (point[0] - centre[0]) * neckScale,
+    tip[1] + NEEDLE_POINT_NECK_HEIGHT,
+    tip[2] + (point[2] - centre[2]) * neckScale,
+  ]);
+  const axis = [(centre[0] + tip[0]) / 2, (centre[1] + tip[1]) / 2, (centre[2] + tip[2]) / 2];
+  let cursor = 0;
+  const putFace = (corners) => {
+    const [a, b, c] = corners;
+    const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+    const vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+    let nx = uy * vz - uz * vy;
+    let ny = uz * vx - ux * vz;
+    let nz = ux * vy - uy * vx;
+    const length = Math.hypot(nx, ny, nz) || 1;
+    nx /= length; ny /= length; nz /= length;
+    // Faces look away from the middle of the point.
+    if (nx * (a[0] - axis[0]) + ny * (a[1] - axis[1]) + nz * (a[2] - axis[2]) < 0) {
+      nx = -nx; ny = -ny; nz = -nz;
+    }
+    for (const corner of corners) {
+      positions[cursor] = corner[0]; positions[cursor + 1] = corner[1]; positions[cursor + 2] = corner[2];
+      normals[cursor] = nx; normals[cursor + 1] = ny; normals[cursor + 2] = nz;
+      cursor += 3;
+    }
+  };
+  for (let side = 0; side < sides; side++) {
+    const next = (side + 1) % sides;
+    putFace([outline[side], outline[next], neck[next], neck[side]]);
+    putFace([neck[side], neck[next], tip]);
+  }
 }

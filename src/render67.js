@@ -8,6 +8,7 @@ import { Renderer67 } from '../67js/67.module.js';
 import { createEnvironmentMap } from '../67js/hdri.js';
 import { loadGltf } from '../67js/gltf.js';
 import '../67js/material-layer-shaders.js';
+import '../67js/liquid-shader.js';
 import '../67js/texture-update.js';
 import { updatePartVertices } from '../67js/update-part-vertices.js';
 import '../67js/render-passes.js';
@@ -15,8 +16,11 @@ import '../67js/camera-effects.js';
 
 import { TAU } from './dsp.js';
 import { R_DISC, R_PROGRAM, R_PROGRAM_MIN, ALPHA_REST, stylusXY } from './geometry.js';
-import { drawDiscSurfaceTexture } from './label.js';
-import { physTo67, mat4Identity, transformPointMat4, buildDiscPart, applyDiscWarpToPart, buildCablePart, MATERIALS } from './meshes67.js';
+import { drawDiscSurfaceSheets } from './label.js';
+import {
+  physTo67, mat4Identity, transformPointMat4, buildDiscPart, applyDiscWarpToPart, buildCablePart, MATERIALS,
+  buildGroovePatchPart, shapeGroovePatch, buildNeedlePointPart, shapeNeedlePoint, STYLUS_TIP_RADIUS,
+} from './meshes67.js';
 
 const PHONOGRAPH = 'phonograph-1877';
 const GRAMOPHONE = 'gramophone-1925';
@@ -286,7 +290,49 @@ export const CAMERA_PRESETS = {
   stylus: { label: 'Needle' },
   profile: { label: 'Side' },
   top: { label: 'Top' },
+  groove: { label: 'Groove' },
 };
+
+// The groove at true scale lies on the record under the needle, part of the same scene as the machine: the
+// camera only has to come close enough to see it.
+export const GROOVE_VIEW_ROWS = 41;         // turns of the groove, about 2 mm either side of the needle
+export const GROOVE_VIEW_COLUMNS = 280;
+export const GROOVE_VIEW_SPAN = 800;        // cut samples either side of the needle, about 8 mm
+const GROOVE_VIEW_DISTANCE = 0.0026;        // where the Groove button brings the camera
+const GROOVE_VIEW_NEAREST = 0.0009;
+// The true groove comes in gradually as the camera nears the needle: nothing at the first distance, all of
+// it at the second, by which point it fills most of the picture.
+const GROOVE_DETAIL_DISTANCE = 0.035;
+const GROOVE_DETAIL_FULL_AT = 0.007;
+const GROOVE_COVER_WIDTH = 64;
+const GROOVE_COVER_HEIGHT = 32;
+const GROOVE_COVER_BORDER = 0.22;           // share of each side over which the patch thins out to nothing
+const GROOVE_PATCH_LIFT = 14e-6;            // the patch rides this far above the disc's own surface
+const NEEDLE_SEARCH_RADIUS = 0.015;         // the machine's needle end is looked for this near the arm's end
+const NEEDLE_REACH = 0.005;                 // a camera aimed this near the needle may come right down to it
+const NEEDLE_POINT_DROP = 0.00012;          // how far the needle's point reaches below the needle the machine is built with
+const NEEDLE_POINT_REACH = 0.0002;          // and the most it stretches to stay seated in the groove
+const NEEDLE_SETTLE_WITHIN = 0.0008;        // a lowered arm rests its own needle on the record from this close
+const NEEDLE_SETTLE_FADE = 0.0008;          // and lets go of it over this much more height
+const NEEDLE_END_SLICE = 0.00006;           // the needle's end outline is read from this much of its lowest part
+// The camera stays this far outside whatever surface it looks at, found by rays shot in from far away.
+const CAMERA_NEAREST = 0.1;
+const CAMERA_CLEARANCE = 0.07;
+const CAMERA_PROBE_DISTANCE = 4;
+const CAMERA_PROBE_OFFSETS = [[0, 0], [0.045, 0], [-0.045, 0], [0, 0.03], [0, -0.03]];
+// Close to the needle the picture covers millimetres, so the clearance shrinks with the distance: full size
+// from CLOSE_RANGE outwards, a share of the distance alone below CLOSE_RANGE_FINE.
+const CLOSE_RANGE = 0.2;
+const CLOSE_RANGE_FINE = 0.05;
+const CLOSE_CLEARANCE_SHARE = 0.25;
+// The Groove button's dive halves the distance at a steady pace: about six seconds from the needle view.
+const GROOVE_ZOOM_NEPERS_PER_SECOND = 0.76;
+// 67js focuses no nearer than a centimetre and its occlusion is sized for whole machines, so both fade out
+// between these two distances.
+const LENS_EFFECTS_FULL_FROM = 0.05;
+const LENS_EFFECTS_GONE_AT = 0.012;
+// 67js refuses a matrix that scales to nothing, so a hidden part is parked far below the floor instead.
+const HIDDEN_MATRIX = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, -60, 0, 1]);
 
 // ---------------------------------------------------------------------------------------------------------
 // Matrix helpers (column-major, 67js space)
@@ -446,6 +492,91 @@ function buildFloorPart(look, floorY) {
 }
 
 // The key light's shadow camera: looks at the machine from the light, wide enough for its shadow on the floor.
+// The end of a machine's needle: the lowest point of its arm within reach of where the arm's needle should
+// be. Returned in the part's own space, with the texture coordinate painted there when the part has one.
+function findNeedleEnd(groups, armGroups, around, searchRadius) {
+  let lowest = Infinity;
+  let lowestPart = null;
+  const visit = (onVertex) => {
+    for (const groupName of armGroups) {
+      for (const part of groups.get(groupName) || []) {
+        const positions = part.geometry.positions;
+        const matrix = part.matrix || IDENTITY_MATRIX;
+        for (let offset = 0; offset < positions.length; offset += 3) {
+          const x = positions[offset];
+          const y = positions[offset + 1];
+          const z = positions[offset + 2];
+          const worldX = matrix[0] * x + matrix[4] * y + matrix[8] * z + matrix[12];
+          const worldY = matrix[1] * x + matrix[5] * y + matrix[9] * z + matrix[13];
+          const worldZ = matrix[2] * x + matrix[6] * y + matrix[10] * z + matrix[14];
+          if (Math.hypot(worldX - around[0], worldZ - around[2]) > searchRadius) continue;
+          onVertex(part, offset / 3, x, y, z, worldY);
+        }
+      }
+    }
+  };
+  visit((part, vertex, x, y, z, worldY) => {
+    if (worldY < lowest) {
+      lowest = worldY;
+      lowestPart = part;
+    }
+  });
+  if (!lowestPart) return null;
+  const sum = [0, 0, 0];
+  let count = 0;
+  let lowestVertex = 0;
+  let lowestSeen = Infinity;
+  visit((part, vertex, x, y, z, worldY) => {
+    if (part !== lowestPart || worldY > lowest + 20e-6) return;
+    sum[0] += x; sum[1] += y; sum[2] += z;
+    count += 1;
+    if (worldY < lowestSeen) {
+      lowestSeen = worldY;
+      lowestVertex = vertex;
+    }
+  });
+  // The outline of the end: the hull, seen from above, of everything within a thin slice of the lowest point.
+  let outline = [];
+  for (let slice = NEEDLE_END_SLICE; outline.length < 3 && slice < 0.001; slice *= 2) {
+    const points = [];
+    visit((part, vertex, x, y, z, worldY) => {
+      if (part === lowestPart && worldY <= lowest + slice) points.push([x, y, z]);
+    });
+    outline = hullSeenFromAbove(points);
+  }
+  if (outline.length < 3) return null;
+  sum[0] = 0; sum[1] = 0; sum[2] = 0;
+  for (const point of outline) {
+    sum[0] += point[0]; sum[1] += point[1]; sum[2] += point[2];
+  }
+  count = outline.length;
+  const uvs = lowestPart.geometry.uvs;
+  return {
+    part: lowestPart,
+    outline,
+    local: [sum[0] / count, sum[1] / count, sum[2] / count],
+    textureCoordinate: uvs ? [uvs[lowestVertex * 2], uvs[lowestVertex * 2 + 1]] : null,
+  };
+}
+const IDENTITY_MATRIX = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+
+// Convex hull of points [x, y, z] by their x and z, in order round the hull.
+function hullSeenFromAbove(points) {
+  const sorted = [...points].sort((first, second) => first[0] - second[0] || first[2] - second[2]);
+  const turn = (origin, a, b) => (a[0] - origin[0]) * (b[2] - origin[2]) - (a[2] - origin[2]) * (b[0] - origin[0]);
+  const build = (list) => {
+    const chain = [];
+    for (const point of list) {
+      while (chain.length >= 2 && turn(chain[chain.length - 2], chain[chain.length - 1], point) <= 1e-14) chain.pop();
+      chain.push(point);
+    }
+    chain.pop();
+    return chain;
+  };
+  if (sorted.length < 3) return sorted;
+  return [...build(sorted), ...build(sorted.reverse())];
+}
+
 function shadowBoundsFor(lightDirection, centre, radius) {
   const toLight = normalize3(lightDirection);
   const distance = radius * 6;
@@ -580,6 +711,10 @@ export class TurntableRenderer67 {
     this.discFinishCanvas.width = discTextureSize;
     this.discFinishCanvas.height = discTextureSize;
     this.discFinishDesc = { image: this.discFinishCanvas, colorSpace: 'linear', wrapS: 33071, wrapT: 33071 };
+    this.discNormalCanvas = document.createElement('canvas');
+    this.discNormalCanvas.width = discTextureSize;
+    this.discNormalCanvas.height = discTextureSize;
+    this.discNormalDesc = { image: this.discNormalCanvas, colorSpace: 'linear', wrapS: 33071, wrapT: 33071 };
     this.lastRecordArgs = null;
 
     this.controlById = new Map(INTERACTIVE_CONTROLS.map((control) => [control.id, control]));
@@ -661,7 +796,7 @@ export class TurntableRenderer67 {
 
     let discPart = null;
     if (definition.hasDisc) {
-      discPart = buildDiscPart('disc', this.discTextureDesc, this.discFinishDesc);
+      discPart = buildDiscPart('disc', this.discTextureDesc, this.discFinishDesc, this.discNormalDesc);
       discPart.localBounds = localBoundsOf(discPart.geometry.positions);
       groups.set('disc', [discPart]);
       machineParts.push(discPart);
@@ -669,6 +804,30 @@ export class TurntableRenderer67 {
 
     const floorPart = buildFloorPart(look, definition.floorZ);
     const parts = [...machineParts, floorPart];
+    let groovePart = null;
+    let stylusTipPart = null;
+    let needleEnd = null;
+    if (discPart) {
+      this.grooveCoverCanvas = document.createElement('canvas');
+      this.grooveCoverCanvas.width = GROOVE_COVER_WIDTH;
+      this.grooveCoverCanvas.height = GROOVE_COVER_HEIGHT;
+      this.grooveCoverDesc = { image: this.grooveCoverCanvas, colorSpace: 'srgb', wrapS: 33071, wrapT: 33071 };
+      this.grooveCoverAmount = -1;
+      this.drawGrooveCover(0);
+      groovePart = buildGroovePatchPart('groove_patch', GROOVE_VIEW_ROWS, GROOVE_VIEW_COLUMNS, this.grooveCoverDesc);
+      groovePart.matrix = HIDDEN_MATRIX;
+      // The point is cut from the same material as the needle it finishes, found where the model's arm
+      // carries its needle.
+      const armDefinition = definition.arm;
+      const modelNeedle = physTo67(armDefinition.stylus[0], armDefinition.stylus[1], 0);
+      needleEnd = findNeedleEnd(groups, armDefinition.groups, modelNeedle, NEEDLE_SEARCH_RADIUS);
+      if (needleEnd) {
+        stylusTipPart = buildNeedlePointPart('stylus_tip', needleEnd.outline, needleEnd.part.material, needleEnd.textureCoordinate);
+        stylusTipPart.matrix = mat4Identity();
+      }
+      parts.push(groovePart);
+      if (stylusTipPart) parts.push(stylusTipPart);
+    }
     // Only the 1979 deck runs on mains: the phonograph is cranked by hand and the gramophone by a spring.
     if (playerId === DIRECT_DRIVE) {
       const floor = definition.floorZ + MAINS_CABLE_RADIUS;
@@ -728,7 +887,7 @@ export class TurntableRenderer67 {
       }
     }
 
-    const stage = { player: playerId, definition, look, parts, machineParts, groups, discPart, renderer, environment, controlByPart, centre, radius, bounds };
+    const stage = { player: playerId, definition, look, parts, machineParts, groups, discPart, groovePart, stylusTipPart, needleTip: needleEnd, renderer, environment, controlByPart, centre, radius, bounds };
     this.prepareMotion(stage);
     this.stage = stage;
     this.updateTransforms(this.lastState || {});
@@ -800,6 +959,8 @@ export class TurntableRenderer67 {
   setCameraPreset(presetKey, snap = false) {
     const stage = this.stage;
     this.activePreset = CAMERA_PRESETS[presetKey] ? presetKey : 'overview';
+    this.followsNeedle = false;
+    this.grooveDive = false;
     if (!stage) return;
     const view = stage.definition.view;
     const centre = [...stage.centre];
@@ -809,12 +970,25 @@ export class TurntableRenderer67 {
       this.cam.fovGoal = view.fov;
       this.cam.distGoal = this.framingDistance(view.fov);
       this.cam.targetGoal = centre;
-    } else if (this.activePreset === 'stylus') {
+    } else if (this.activePreset === 'groove' && stage.groovePart) {
+      // The needle view carried on down to the groove: the same side, where nothing stands between the camera
+      // and the needle, at the unhurried pace a hundredfold change of scale needs.
+      this.followsNeedle = true;
+      this.grooveDive = true;
+      this.cam.azGoal = view.azimuth - 0.35;
+      this.cam.elGoal = 0.42;
+      this.cam.fovGoal = 24;
+      this.cam.distGoal = GROOVE_VIEW_DISTANCE;
+      this.cam.targetGoal = [...this.needleTarget()];
+      this.keepCameraOutside();
+    } else if (this.activePreset === 'stylus' || this.activePreset === 'groove') {
+      this.activePreset = 'stylus';
+      this.followsNeedle = true;
       this.cam.azGoal = view.azimuth - 0.35;
       this.cam.elGoal = 0.24;
       this.cam.fovGoal = 24;
       this.cam.distGoal = 0.2;
-      this.cam.targetGoal = [...this.lastStylus67];
+      this.cam.targetGoal = [...this.needleTarget()];
     } else if (this.activePreset === 'profile') {
       this.cam.azGoal = 0;
       this.cam.elGoal = 0.12;
@@ -840,7 +1014,8 @@ export class TurntableRenderer67 {
   orbit(deltaAzimuth, deltaElevation) {
     this.cam.azGoal -= deltaAzimuth;
     this.cam.elGoal = Math.max(0.04, Math.min(1.52, this.cam.elGoal + deltaElevation));
-    this.activePreset = 'custom';
+    if (this.activePreset !== 'groove') this.activePreset = 'custom';
+    this.keepCameraOutside();
   }
 
   pan(deltaX, deltaY) {
@@ -851,10 +1026,17 @@ export class TurntableRenderer67 {
     this.cam.targetGoal[2] += deltaX * sine * scale;
     this.cam.targetGoal[1] += deltaY * scale;
     this.activePreset = 'custom';
+    this.followsNeedle = false;
+    this.grooveDive = false;
+    this.keepCameraOutside();
   }
 
   zoom(factor) {
-    this.cam.distGoal = Math.max(0.1, Math.min(3.2, this.cam.distGoal * factor));
+    // Aimed at the needle the camera may go all the way down to the groove; anywhere else it stops at arm's length.
+    this.grooveDive = false;
+    const nearest = this.aimsAtNeedle() ? GROOVE_VIEW_NEAREST : CAMERA_NEAREST;
+    this.cam.distGoal = Math.max(nearest, Math.min(3.2, this.cam.distGoal * factor));
+    this.keepCameraOutside();
   }
 
   // --- Record --------------------------------------------------------------------------------------------
@@ -869,15 +1051,52 @@ export class TurntableRenderer67 {
       inkColor: meta?.inkColor || meta?.ink || '#e6c98a',
       playerEra: this.activePlayer,
     };
-    drawDiscSurfaceTexture(rec, vis, titles.length ? titles : [labelMeta.albumTitle], labelMeta, this.discCanvas, this.discFinishCanvas);
     const stage = this.stage;
-    if (!stage || !stage.discPart) return;
-    if (typeof stage.renderer.updateTexture === 'function') {
-      stage.renderer.updateTexture(this.discTextureDesc);
-      stage.renderer.updateTexture(this.discFinishDesc);
+    // The cylinder machine has no disc to dress; the sheets are drawn when a disc machine is next built.
+    if (stage && !stage.discPart) return Promise.resolve();
+    if (stage) {
+      const positions = applyDiscWarpToPart(stage.discPart, rec);
+      updatePartVertices(stage.renderer, stage.discPart, positions, stage.discPart.geometry.normals);
     }
-    const positions = applyDiscWarpToPart(stage.discPart, rec);
-    updatePartVertices(stage.renderer, stage.discPart, positions, stage.discPart.geometry.normals);
+    // Only the newest request is drawn: pressing a record asks twice in a row, and so does a machine change.
+    this.sheetRequest = { rec, vis, titles: titles.length ? titles : [labelMeta.albumTitle], labelMeta };
+    this.sheetLoop ??= this.drawRequestedSheets();
+    return this.sheetLoop;
+  }
+
+  // Resolves once no disc sheet is waiting to be drawn or uploaded.
+  sheetsSettled() {
+    return this.sheetLoop || Promise.resolve();
+  }
+
+  async drawRequestedSheets() {
+    try {
+      await Promise.resolve();
+      while (this.sheetRequest) {
+        const request = this.sheetRequest;
+        this.sheetRequest = null;
+        const finished = await drawDiscSurfaceSheets(
+          request.rec,
+          request.vis,
+          request.titles,
+          request.labelMeta,
+          { color: this.discCanvas, finish: this.discFinishCanvas, normal: this.discNormalCanvas },
+          () => !this.sheetRequest,
+        );
+        if (!finished) continue;
+        // One texture a frame, so the upload of three large sheets never lands in a single frame.
+        for (const descriptor of [this.discTextureDesc, this.discFinishDesc, this.discNormalDesc]) {
+          const stage = this.stage;
+          if (this.sheetRequest || !stage || !stage.discPart) break;
+          stage.renderer.updateTexture(descriptor);
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      }
+    } catch (error) {
+      console.error('Could not draw the disc sheets', error);
+    } finally {
+      this.sheetLoop = null;
+    }
   }
 
   // Changes whenever the view does, so anything pinned to the screen knows when to let go.
@@ -968,8 +1187,16 @@ export class TurntableRenderer67 {
       }
       const swing = wrapAngle(armAngle - arm.modelAngle);
       const pivot67 = physTo67(arm.pivot[0], arm.pivot[1], 0);
-      const armMatrix = rotationAbout(AXIS_UP, swing, pivot67, [0, stylusHeight - arm.tipZ + 0.0006, 0]);
+      const armHeight = stylusHeight - arm.tipZ + 0.0006;
+      let armMatrix = rotationAbout(AXIS_UP, swing, pivot67, [0, armHeight, 0]);
       for (const groupName of arm.groups) this.setGroupMatrix(groupName, armMatrix);
+      // A lowered arm rests on its own needle: the end of the needle the machine is built with comes down
+      // to the record, riding its warp, with only the point itself left between them.
+      const settle = this.needleSettle();
+      if (settle !== 0) {
+        armMatrix = rotationAbout(AXIS_UP, swing, pivot67, [0, armHeight + settle, 0]);
+        for (const groupName of arm.groups) this.setGroupMatrix(groupName, armMatrix);
+      }
       const stylusX = arm.pivot[0] + arm.length * Math.cos(armAngle);
       const stylusY = arm.pivot[1] + arm.length * Math.sin(armAngle);
       this.lastStylus67 = physTo67(stylusX, stylusY, Math.max(0.002, stylusHeight));
@@ -1027,11 +1254,27 @@ export class TurntableRenderer67 {
     if (!stage) return;
     this.updateTransforms(state);
 
-    if (this.activePreset === 'stylus') this.cam.targetGoal = [...this.lastStylus67];
+    this.locateNeedle();
+    if (this.followsNeedle) this.cam.targetGoal = [...this.needleTarget()];
+    if (this.cam.distGoal < CAMERA_NEAREST && !this.aimsAtNeedle()) {
+      // The needle has left the record (or the camera has left the needle): back out to arm's length.
+      this.cam.distGoal = CAMERA_NEAREST;
+      this.keepCameraOutside();
+    }
+    this.updateGrooveView(state);
     const damping = 0.16;
     this.cam.az += (this.cam.azGoal - this.cam.az) * damping;
     this.cam.el += (this.cam.elGoal - this.cam.el) * damping;
-    this.cam.dist += (this.cam.distGoal - this.cam.dist) * damping;
+    if (this.grooveDive && this.cam.distGoal < this.cam.dist) {
+      // Going down to the groove covers a hundredfold change of scale, so it moves by ratio, and slowly.
+      const now = performance.now();
+      const seconds = Math.min(0.05, Math.max(0, (now - (this.lastZoomStepAt ?? now)) / 1000));
+      this.lastZoomStepAt = now;
+      this.cam.dist = Math.max(this.cam.distGoal, this.cam.dist * Math.exp(-GROOVE_ZOOM_NEPERS_PER_SECOND * seconds));
+    } else {
+      this.lastZoomStepAt = undefined;
+      this.cam.dist += (this.cam.distGoal - this.cam.dist) * damping;
+    }
     this.cam.fov += (this.cam.fovGoal - this.cam.fov) * damping;
     for (let axis = 0; axis < 3; axis++) {
       this.cam.target[axis] += (this.cam.targetGoal[axis] - this.cam.target[axis]) * damping;
@@ -1076,7 +1319,8 @@ export class TurntableRenderer67 {
       target: this.cam.target,
       up: [0, 1, 0],
       fov: this.cam.fov,
-      near: 0.02,
+      // The near plane comes in with the camera, so the groove can fill the picture from two millimetres away.
+      near: Math.max(0.0001, Math.min(0.02, this.cam.dist * 0.05)),
       far: 12,
       exposure: look.exposure,
       environment: { ...stage.environment, pointLights },
@@ -1084,13 +1328,196 @@ export class TurntableRenderer67 {
     });
   }
 
+  // --- The groove at true scale ----------------------------------------------------------------------------
+  // The simulation's wall positions around the needle, refreshed by the page every frame.
+  setGrooveWalls(walls) {
+    this.grooveWalls = walls;
+  }
+
+  // The end of the machine's own needle: the lowest point of the arm near where the arm says its needle is.
+  // Found once per machine, in the arm's own space, and carried along by the arm's matrix from then on.
+  needleTipPoint() {
+    const stage = this.stage;
+    if (!stage || !stage.arm || !stage.groovePart) return null;
+    const tip = stage.needleTip;
+    if (!tip) return null;
+    const [x, y, z] = tip.local;
+    const matrix = tip.part.matrix;
+    return [
+      matrix[0] * x + matrix[4] * y + matrix[8] * z + matrix[12],
+      matrix[1] * x + matrix[5] * y + matrix[9] * z + matrix[13],
+      matrix[2] * x + matrix[6] * y + matrix[10] * z + matrix[14],
+    ];
+  }
+
+  // How far the arm must still drop for its needle to rest on the record: nothing while the arm is lifted.
+  needleSettle() {
+    this.locateNeedle();
+    if (!this.needleContact) return 0;
+    const gap = this.needleTip[1] - this.needleContact[1];
+    const share = Math.max(0, Math.min(1, 1 - (gap - NEEDLE_SETTLE_WITHIN) / NEEDLE_SETTLE_FADE));
+    const eased = share * share * (3 - 2 * share);
+    return (NEEDLE_POINT_DROP - gap) * eased;
+  }
+
+  // Where the record's surface lies under the machine's needle; nothing while the needle is off the record.
+  locateNeedle() {
+    const stage = this.stage;
+    this.needleTip = this.needleTipPoint();
+    this.needleContact = null;
+    if (!this.needleTip || !stage.discPart) return;
+    const [x, y, z] = this.needleTip;
+    const probeHeight = 0.5;
+    const hit = this.castRay({ origin: [x, y + probeHeight, z], dir: [0, -1, 0] }, [stage.discPart]);
+    if (!Number.isFinite(hit.distance)) return;
+    this.needleContact = [x, y + probeHeight - hit.distance, z];
+  }
+
+  // What the needle views look at.
+  needleTarget() {
+    return this.needleContact || this.lastStylus67;
+  }
+
+  // True when the camera is aimed at the spot where the needle rides the record.
+  aimsAtNeedle() {
+    const contact = this.needleContact;
+    if (!contact) return false;
+    if (this.followsNeedle) return true;
+    const goal = this.cam.targetGoal;
+    return Math.hypot(goal[0] - contact[0], goal[1] - contact[1], goal[2] - contact[2]) < NEEDLE_REACH;
+  }
+
+  // Paints the patch's cover: white, with an alpha that is the given amount in the middle and falls to
+  // nothing along the border. Returns true when the picture changed.
+  drawGrooveCover(amount) {
+    const rounded = Math.round(Math.max(0, Math.min(1, amount)) * 50) / 50;
+    if (rounded === this.grooveCoverAmount) return false;
+    this.grooveCoverAmount = rounded;
+    const canvas = this.grooveCoverCanvas;
+    const context = canvas.getContext('2d');
+    const image = context.createImageData(canvas.width, canvas.height);
+    const ease = (share) => {
+      const clamped = Math.max(0, Math.min(1, share));
+      return clamped * clamped * (3 - 2 * clamped);
+    };
+    for (let y = 0; y < canvas.height; y++) {
+      const fromSide = Math.min(y, canvas.height - 1 - y) / (canvas.height - 1);
+      for (let x = 0; x < canvas.width; x++) {
+        const fromEnd = Math.min(x, canvas.width - 1 - x) / (canvas.width - 1);
+        const edge = ease((fromSide - 0.02) / GROOVE_COVER_BORDER) * ease((fromEnd - 0.02) / GROOVE_COVER_BORDER);
+        const offset = (y * canvas.width + x) * 4;
+        image.data[offset] = 255;
+        image.data[offset + 1] = 255;
+        image.data[offset + 2] = 255;
+        image.data[offset + 3] = Math.round(255 * rounded * edge);
+      }
+    }
+    context.putImageData(image, 0, 0);
+    return true;
+  }
+
+  // The patch of true groove lies on the record under the needle whenever the camera is near enough to
+  // make it out; the machine, its light and its shadows stay exactly as they are.
+  updateGrooveView(state) {
+    const stage = this.stage;
+    if (!stage || !stage.groovePart) {
+      this.grooveViewShown = false;
+      return;
+    }
+    const contact = this.needleContact;
+    let shown = false;
+    let nearness = Infinity;
+    if (contact) {
+      const target = this.cam.target;
+      const aimedOff = Math.hypot(target[0] - contact[0], target[1] - contact[1], target[2] - contact[2]);
+      nearness = this.cam.dist + aimedOff;
+      shown = nearness < GROOVE_DETAIL_DISTANCE;
+    }
+
+    let sideways = 0;
+    let seat = 0;
+    let outward = [0, 0, 1];
+    let along = [1, 0, 0];
+    let surface = 0;
+    if (contact) {
+      const reach = Math.hypot(contact[0], contact[2]) || 1;
+      outward = [contact[0] / reach, 0, contact[2] / reach];
+      along = [outward[2], 0, -outward[0]];
+      surface = contact[1] + GROOVE_PATCH_LIFT;
+      const record = this.lastRecordArgs && this.lastRecordArgs[0];
+      const walls = this.grooveWalls;
+      const expected = GROOVE_VIEW_ROWS * GROOVE_VIEW_COLUMNS * 2 + 2;
+      if (record && walls && walls.length === expected) {
+        // The ball of the needle rests on both walls of the middle groove.
+        const middle = ((GROOVE_VIEW_ROWS - 1) / 2 * GROOVE_VIEW_COLUMNS + Math.floor(GROOVE_VIEW_COLUMNS / 2)) * 2;
+        const inner = walls[middle];
+        const outer = walls[middle + 1];
+        if (inner === inner && outer === outer) {
+          sideways = walls[expected - 2] || 0;
+          seat = STYLUS_TIP_RADIUS * (Math.SQRT2 - 1) - (outer - inner) / 2;
+        }
+        if (shown) {
+          const metresPerSample = (reach * Math.PI * 2) / record.spr;
+          shapeGroovePatch(stage.groovePart, walls, GROOVE_VIEW_SPAN * metresPerSample);
+          updatePartVertices(stage.renderer, stage.groovePart, stage.groovePart.geometry.positions, stage.groovePart.geometry.normals);
+        }
+      }
+    }
+
+    // The needle's point belongs to the machine at every distance: it hangs from the end of the needle, and
+    // on the record it sits in the groove being played.
+    const moved = [];
+    const needle = this.needleTip;
+    if (needle && stage.stylusTipPart) {
+      // Down in the groove whenever the needle is low enough to reach it; hanging from the needle otherwise.
+      const inGroove = contact && needle[1] - NEEDLE_POINT_REACH <= surface + seat;
+      const height = inGroove ? surface + seat : needle[1] - NEEDLE_POINT_DROP;
+      const tip = [needle[0] + outward[0] * sideways, height, needle[2] + outward[2] * sideways];
+      // The arm only turns about the upright axis and shifts, so its matrix is undone by hand.
+      const matrix = stage.needleTip.part.matrix;
+      const dx = tip[0] - matrix[12];
+      const dy = tip[1] - matrix[13];
+      const dz = tip[2] - matrix[14];
+      const point = stage.stylusTipPart;
+      shapeNeedlePoint(point, [
+        matrix[0] * dx + matrix[1] * dy + matrix[2] * dz,
+        matrix[4] * dx + matrix[5] * dy + matrix[6] * dz,
+        matrix[8] * dx + matrix[9] * dy + matrix[10] * dz,
+      ]);
+      updatePartVertices(stage.renderer, point, point.geometry.positions, point.geometry.normals);
+      point.matrix = matrix;
+      moved.push(point);
+    }
+
+    if (shown) {
+      // By ratio, so the patch comes in evenly over the scroll of the wheel.
+      const cover = Math.log(GROOVE_DETAIL_DISTANCE / nearness) / Math.log(GROOVE_DETAIL_DISTANCE / GROOVE_DETAIL_FULL_AT);
+      if (this.drawGrooveCover(cover)) stage.renderer.updateTexture(this.grooveCoverDesc);
+      stage.groovePart.matrix = new Float32Array([
+        along[0], along[1], along[2], 0,
+        0, 1, 0, 0,
+        outward[0], outward[1], outward[2], 0,
+        contact[0], surface, contact[2], 1,
+      ]);
+      moved.push(stage.groovePart);
+    } else if (this.grooveViewShown) {
+      stage.groovePart.matrix = HIDDEN_MATRIX;
+      moved.push(stage.groovePart);
+    }
+    this.grooveViewShown = shown;
+    if (moved.length) stage.renderer.updateParts(moved);
+  }
+
   // The look's grade plus what depends on the shot: contact shading, a little film grain, and a shallow
   // focus that only sets in when the camera comes close, the way a lens behaves near its subject.
   frameEffects(look) {
     const distance = this.cam.dist;
     const closeness = Math.max(0, Math.min(1, (CLOSE_UP_DISTANCE - distance) / CLOSE_UP_DISTANCE));
-    const effects = { ...look.effects, ambientOcclusion: 0.5, grain: 0.012 };
-    if (closeness > 0.02) effects.depthOfField = { blur: 0.014 * closeness, focusDistance: distance };
+    const lens = Math.max(0, Math.min(1, (distance - LENS_EFFECTS_GONE_AT) / (LENS_EFFECTS_FULL_FROM - LENS_EFFECTS_GONE_AT)));
+    const effects = { ...look.effects, ambientOcclusion: 0.5 * lens, grain: 0.012 };
+    if (closeness > 0.02 && lens > 0) {
+      effects.depthOfField = { blur: 0.014 * closeness * lens, focusDistance: Math.max(0.01, distance) };
+    }
     return effects;
   }
 
@@ -1152,15 +1579,13 @@ export class TurntableRenderer67 {
   }
 
   // --- Picking -------------------------------------------------------------------------------------------
-  // Nearest triangle hit over every machine part, so a control hidden behind the cabinet is not picked.
-  pickControl(clientX, clientY) {
+  // The nearest triangle of any machine part along a ray, and how far along the ray it lies.
+  castRay(ray, parts = this.stage.machineParts) {
     const stage = this.stage;
-    const ray = this.screenRay67(clientX, clientY);
-    if (!stage || !ray) return null;
     let bestDistance = Infinity;
     let bestPart = null;
 
-    for (const part of stage.machineParts) {
+    for (const part of parts) {
       const matrix = part.matrix;
       const ox = ray.origin[0] - matrix[12];
       const oy = ray.origin[1] - matrix[13];
@@ -1230,6 +1655,56 @@ export class TurntableRenderer67 {
         bestPart = part;
       }
     }
+    return { distance: bestDistance, part: bestPart };
+  }
+
+  // How close the camera may come to its target, looking from where it is headed, before it would enter
+  // a part. A few parallel rays are tried so the edges of the picture stay outside as well.
+  nearestClearDistance(offsetScale = 1, clearance = CAMERA_CLEARANCE, floor = CAMERA_NEAREST) {
+    if (!this.stage) return floor;
+    const cosElevation = Math.cos(this.cam.elGoal);
+    const outward = [
+      cosElevation * Math.sin(this.cam.azGoal),
+      Math.sin(this.cam.elGoal),
+      cosElevation * Math.cos(this.cam.azGoal),
+    ];
+    const right = [Math.cos(this.cam.azGoal), 0, -Math.sin(this.cam.azGoal)];
+    const up = [
+      outward[1] * right[2] - outward[2] * right[1],
+      outward[2] * right[0] - outward[0] * right[2],
+      outward[0] * right[1] - outward[1] * right[0],
+    ];
+    const inward = [-outward[0], -outward[1], -outward[2]];
+    let nearest = floor;
+    for (const [sideways, upwards] of CAMERA_PROBE_OFFSETS) {
+      const origin = [0, 1, 2].map((axis) => this.cam.targetGoal[axis]
+        + outward[axis] * CAMERA_PROBE_DISTANCE
+        + right[axis] * sideways * offsetScale + up[axis] * upwards * offsetScale);
+      const hit = this.castRay({ origin, dir: inward }).distance;
+      if (Number.isFinite(hit)) nearest = Math.max(nearest, CAMERA_PROBE_DISTANCE - hit + clearance);
+      if (offsetScale === 0) break;
+    }
+    return nearest;
+  }
+
+  // Pushes the camera back out when a zoom, turn or slide would put it inside the machine.
+  keepCameraOutside() {
+    if (!this.aimsAtNeedle() || this.cam.distGoal >= CLOSE_RANGE) {
+      this.cam.distGoal = Math.max(this.cam.distGoal, Math.min(3.2, this.nearestClearDistance()));
+      return;
+    }
+    const distance = this.cam.distGoal;
+    const wide = Math.max(0, Math.min(1, (distance - CLOSE_RANGE_FINE) / (CLOSE_RANGE - CLOSE_RANGE_FINE)));
+    const clearance = CAMERA_CLEARANCE * wide + CLOSE_CLEARANCE_SHARE * distance * (1 - wide);
+    this.cam.distGoal = Math.max(distance, Math.min(3.2, this.nearestClearDistance(wide, clearance, 0)));
+  }
+
+  // Nearest triangle hit over every machine part, so a control hidden behind the cabinet is not picked.
+  pickControl(clientX, clientY) {
+    const stage = this.stage;
+    const ray = this.screenRay67(clientX, clientY);
+    if (!stage || !ray) return null;
+    const { distance: bestDistance, part: bestPart } = this.castRay(ray);
 
     const control = bestPart ? stage.controlByPart.get(bestPart) : null;
     if (!control) return null;
@@ -1287,6 +1762,44 @@ export class TurntableRenderer67 {
       scaleX: (0.5 * cssWidth) / (tangent * basis.aspect),
       scaleY: (0.5 * cssHeight) / tangent,
     };
+  }
+
+  // Where each control of this machine sits on screen (the middle of its parts), for the pinned labels.
+  controlAnchors(cssWidth, cssHeight) {
+    const stage = this.stage;
+    if (!stage || !this.camBasis) return [];
+    const { basis, scaleX, scaleY } = this.screenProjector(cssWidth, cssHeight);
+    const { eye, fx, fy, fz, rx, ry, rz, ux, uy, uz } = basis;
+    const anchors = [];
+    for (const control of INTERACTIVE_CONTROLS) {
+      if (control.player !== stage.player) continue;
+      const centre = [0, 0, 0];
+      let count = 0;
+      for (const groupName of control.groups) {
+        for (const part of stage.groups.get(groupName) || []) {
+          const bounds = part.localBounds;
+          const matrix = part.matrix;
+          const localX = (bounds[0] + bounds[3]) / 2;
+          const localY = (bounds[1] + bounds[4]) / 2;
+          const localZ = (bounds[2] + bounds[5]) / 2;
+          centre[0] += matrix[0] * localX + matrix[4] * localY + matrix[8] * localZ + matrix[12];
+          centre[1] += matrix[1] * localX + matrix[5] * localY + matrix[9] * localZ + matrix[13];
+          centre[2] += matrix[2] * localX + matrix[6] * localY + matrix[10] * localZ + matrix[14];
+          count += 1;
+        }
+      }
+      if (!count) continue;
+      const dx = centre[0] / count - eye[0];
+      const dy = centre[1] / count - eye[1];
+      const dz = centre[2] / count - eye[2];
+      const depth = dx * fx + dy * fy + dz * fz;
+      if (depth <= 0.02) continue;
+      const x = cssWidth / 2 + ((dx * rx + dy * ry + dz * rz) / depth) * scaleX;
+      const y = cssHeight / 2 - ((dx * ux + dy * uy + dz * uz) / depth) * scaleY;
+      if (x < 0 || y < 0 || x > cssWidth || y > cssHeight) continue;
+      anchors.push({ control, x, y });
+    }
+    return anchors;
   }
 
   machineScreenBounds(projector) {

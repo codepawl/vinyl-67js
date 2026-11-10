@@ -2,12 +2,11 @@
 // 1. Center paper label + full vinyl disc surface map (modulated grooves, lead-in/out, track gaps, scratches, dust)
 // 2. Wax cylinder surface texture for the 1877 Edison Phonograph
 import { TAU, rng } from './dsp.js';
-import { R_DISC, R_LEADIN, R_LOCK, R_LABEL, thetaForRadius } from './geometry.js';
+import { R_DISC, R_LEADIN, R_LABEL } from './geometry.js';
+import { buildSheetTables, shadeSheetRows } from './disc-sheet.js';
 
 const LABEL_SIZE = 1024;
 const DISC_TEX_SIZE = 1024;
-// +1 when the groove angle grows the same way round as the disc mesh's own angle, -1 when it runs the other way.
-const GROOVE_ANGLE_SIGN = 1;
 const SANS = '"Helvetica Neue", Helvetica, Arial, sans-serif';
 const SERIF = 'Georgia, "Times New Roman", serif';
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
@@ -180,187 +179,133 @@ export function drawLabel(titles = [], meta = {}, targetCanvas = null) {
 // includes the paper center label inside r < R_LABEL and the actual modulated spiral grooves outside.
 // finishCanvas, when given, receives the surface finish in glTF layout (green = roughness, blue = metal):
 // the land between turns is a mirror, the groove walls scatter light, the paper label is matt.
-export function drawDiscSurfaceTexture(rec, vis, titles = [], meta = {}, targetCanvas = null, finishCanvas = null) {
-  const canvas = targetCanvas || createSheet(DISC_TEX_SIZE);
-  const ctx = canvas.getContext('2d');
+// --- The disc sheets ---------------------------------------------------------------------------------------
+// The pixels are shaded in workers, a band of rows at a time, so loading a record does not freeze the page.
+const SHEET_WORKERS_AT_MOST = 6;
+const SHEET_BANDS_PER_WORKER = 2;
+let sheetWorkers = null;
+let sheetJobCounter = 0;
+
+function sheetWorkerPool() {
+  if (sheetWorkers) return sheetWorkers;
+  sheetWorkers = [];
+  if (typeof Worker !== 'function') return sheetWorkers;
+  const count = Math.max(1, Math.min(SHEET_WORKERS_AT_MOST, (navigator.hardwareConcurrency || 4) - 1));
+  try {
+    for (let index = 0; index < count; index++) {
+      sheetWorkers.push(new Worker(new URL('./disc-sheet-worker.js', import.meta.url), { type: 'module' }));
+    }
+  } catch (error) {
+    console.warn('Disc sheets are drawn on the main thread', error);
+    sheetWorkers = [];
+  }
+  return sheetWorkers;
+}
+
+function nextFrame() {
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    requestAnimationFrame(settle);
+    // A hidden tab draws no frames; the job still has to finish.
+    setTimeout(settle, 120);
+  });
+}
+
+// Calls onBand for every finished band; resolves when all are in, or rejects when a worker fails.
+function shadeInWorkers(tables, onBand) {
+  const workers = sheetWorkerPool();
+  if (!workers.length) return Promise.reject(new Error('no workers'));
+  const job = ++sheetJobCounter;
+  const size = tables.size;
+  const bandCount = workers.length * SHEET_BANDS_PER_WORKER;
+  const bandRows = Math.ceil(size / bandCount);
+  return new Promise((resolve, reject) => {
+    let pending = 0;
+    const cleanUp = () => {
+      for (const worker of workers) {
+        worker.removeEventListener('message', onMessage);
+        worker.removeEventListener('error', onError);
+      }
+    };
+    function onMessage(event) {
+      if (event.data.job !== job) return;
+      onBand(event.data);
+      pending -= 1;
+      if (pending === 0) {
+        cleanUp();
+        resolve();
+      }
+    }
+    function onError(event) {
+      cleanUp();
+      reject(event.error || new Error(event.message || 'disc sheet worker failed'));
+    }
+    for (const worker of workers) {
+      worker.addEventListener('message', onMessage);
+      worker.addEventListener('error', onError);
+      worker.postMessage({ tables });
+    }
+    for (let band = 0; band < bandCount; band++) {
+      const firstRow = band * bandRows;
+      const lastRow = Math.min(size, firstRow + bandRows);
+      if (firstRow >= lastRow) continue;
+      pending += 1;
+      workers[band % workers.length].postMessage({ job, firstRow, lastRow });
+    }
+  });
+}
+
+// Draws the colour, finish and normal sheets of a record into the three canvases. isCurrent is asked along
+// the way; when a newer record has been requested the job stops and the promise resolves to false.
+export async function drawDiscSurfaceSheets(rec, vis, titles, meta, canvases, isCurrent = () => true) {
+  const { color: canvas, finish: finishCanvas, normal: normalCanvas } = canvases;
   const size = canvas.width;
   const half = size / 2;
+  const contexts = {
+    color: canvas.getContext('2d'),
+    finish: finishCanvas ? finishCanvas.getContext('2d') : null,
+    normal: normalCanvas ? normalCanvas.getContext('2d') : null,
+  };
+  const tables = buildSheetTables(rec, vis, size);
 
-  const labelCanvas = drawLabel(titles, meta);
-  const img = ctx.createImageData(size, size);
-  const data = img.data;
-  const finishContext = finishCanvas ? finishCanvas.getContext('2d') : null;
-  const finishImage = finishContext ? finishContext.createImageData(size, size) : null;
-  const finish = finishImage ? finishImage.data : null;
-  const PAPER_ROUGHNESS = 215;
-  const VINYL_METAL = 36;
-  if (finish) {
-    for (let offset = 0; offset < finish.length; offset += 4) {
-      finish[offset] = 255;
-      finish[offset + 1] = PAPER_ROUGHNESS;
-      finish[offset + 2] = 0;
-      finish[offset + 3] = 255;
+  const bands = [];
+  try {
+    await shadeInWorkers(tables, (band) => bands.push(band));
+  } catch (error) {
+    // No workers here: shade on the page, a slice at a time so it can still draw frames in between.
+    bands.length = 0;
+    const sliceRows = 128;
+    for (let firstRow = 0; firstRow < size; firstRow += sliceRows) {
+      const lastRow = Math.min(size, firstRow + sliceRows);
+      bands.push({ firstRow, lastRow, ...shadeSheetRows(tables, firstRow, lastRow) });
+      if ((firstRow / sliceRows) % 4 === 3) await nextFrame();
+      if (!isCurrent()) return false;
+    }
+  }
+  if (!isCurrent()) return false;
+
+  // Copying the bands into the canvases is spread over a few frames.
+  let copied = 0;
+  for (const band of bands) {
+    const rows = band.lastRow - band.firstRow;
+    for (const sheet of ['color', 'finish', 'normal']) {
+      if (contexts[sheet]) contexts[sheet].putImageData(new ImageData(band[sheet], size, rows), 0, band.firstRow);
+    }
+    copied += 1;
+    if (copied % 3 === 0) {
+      await nextFrame();
+      if (!isCurrent()) return false;
     }
   }
 
-  // Build radial lookup table for groove pitch and average modulation per radius
-  const bins = 512;
-  const modByBin = new Float32Array(bins);
-  const gapByBin = new Uint8Array(bins);
-  const rLo = R_LOCK - 0.002;
-  const rHi = R_LEADIN + 0.002;
-
-  if (rec && vis && rec.rTab) {
-    for (let b = 0; b < bins; b++) {
-      const r = rLo + ((rHi - rLo) * b) / (bins - 1);
-      const rev = thetaForRadius(rec.rTab, r) / TAU;
-      const row = Math.max(0, Math.min(vis.rows - 1, Math.floor(rev)));
-      let sum = 0;
-      for (let c = 0; c < vis.cols; c += 4) {
-        sum += vis.data[row * vis.cols + c];
-      }
-      modByBin[b] = sum / (vis.cols / 4) / 255;
-
-      const rNext = r + 0.00025;
-      const dRev = Math.abs(thetaForRadius(rec.rTab, r - 0.00025) - thetaForRadius(rec.rTab, rNext)) / TAU;
-      if (dRev < 0.75 && r > R_LOCK + 0.004 && r < R_LEADIN - 0.003) {
-        gapByBin[b] = 1;
-      }
-    }
-  } else {
-    for (let b = 0; b < bins; b++) {
-      modByBin[b] = 0.35 + 0.25 * Math.sin(b * 0.17);
-      if (b === 170 || b === 330) gapByBin[b] = 1;
-    }
-  }
-
+  const ctx = contexts.color;
   const scratches = rec?.scratches || [];
   const dustLevel = rec?.condition?.dust ?? 0.25;
-
-  // The real spiral: how many turns in the groove is at each radius, and how far apart the turns are there.
-  // With these the texture draws every turn of the groove where the cutter put it, so the needle is seen
-  // riding the same groove the simulation plays.
-  const turnSamples = 8192;
-  const turnsByRadius = new Float32Array(turnSamples);
-  const pitchByRadius = new Float32Array(turnSamples);
-  const hasSpiral = !!(rec && rec.rTab);
-  if (hasSpiral) {
-    for (let index = 0; index < turnSamples; index++) {
-      const radius = rLo + ((rHi - rLo) * index) / (turnSamples - 1);
-      turnsByRadius[index] = thetaForRadius(rec.rTab, radius) / TAU;
-    }
-    const radiusStep = (rHi - rLo) / (turnSamples - 1);
-    for (let index = 0; index < turnSamples; index++) {
-      const before = turnsByRadius[Math.max(0, index - 4)];
-      const after = turnsByRadius[Math.min(turnSamples - 1, index + 4)];
-      const turnsPerMetre = Math.abs(after - before) / (8 * radiusStep);
-      pitchByRadius[index] = turnsPerMetre > 1 ? 1 / turnsPerMetre : 0;
-    }
-  }
-  const grooveWidth = rec?.W || 56e-6;
-  const pixelMetres = R_DISC / half;
-
-  for (let y = 0; y < size; y++) {
-    const dy = (y + 0.5 - half) / half;
-    for (let x = 0; x < size; x++) {
-      const dx = (x + 0.5 - half) / half;
-      const rNorm = Math.hypot(dx, dy);
-      const rMeters = rNorm * R_DISC;
-      const idx = (y * size + x) * 4;
-
-      if (rMeters < 0.0037) {
-        // Spindle hole
-        data[idx] = 10;
-        data[idx + 1] = 10;
-        data[idx + 2] = 12;
-        data[idx + 3] = 255;
-        continue;
-      }
-
-      if (rMeters <= R_LABEL) {
-        // Will be overdrawn with the high-res labelCanvas below
-        data[idx] = 30;
-        data[idx + 1] = 30;
-        data[idx + 2] = 32;
-        data[idx + 3] = 255;
-        continue;
-      }
-
-      if (rMeters > R_DISC) {
-        data[idx] = 8;
-        data[idx + 1] = 8;
-        data[idx + 2] = 10;
-        data[idx + 3] = 255;
-        continue;
-      }
-
-      const phi = Math.atan2(dy, dx);
-      const u = (rMeters - rLo) / (rHi - rLo);
-      const bin = Math.max(0, Math.min(bins - 1, Math.floor(u * (bins - 1))));
-
-      let shade = 14; // base deep black PVC
-      let roughness = 0.1;
-      if (rMeters >= R_LOCK && rMeters <= R_LEADIN) {
-        const mod = modByBin[bin];
-        // Fine concentric groove rings + angular modulation variation
-        let grooveRing = 0.5 + 0.5 * Math.sin(rMeters * 26500 + phi);
-        let turns = 0;
-        if (hasSpiral) {
-          const position = Math.max(0, Math.min(turnSamples - 1.001, u * (turnSamples - 1)));
-          const sample = Math.floor(position);
-          const blend = position - sample;
-          turns = turnsByRadius[sample] + (turnsByRadius[sample + 1] - turnsByRadius[sample]) * blend;
-          const pitch = pitchByRadius[sample];
-          // Angle of this point on the disc, counted the way the groove angle is counted.
-          const discAngle = Math.atan2(-dy, dx) * GROOVE_ANGLE_SIGN;
-          let offset = turns - discAngle / TAU;
-          offset -= Math.round(offset);
-          const metresFromGroove = Math.abs(offset) * pitch;
-          const coverage = (grooveWidth / 2 - metresFromGroove) / pixelMetres + 0.5;
-          grooveRing = pitch > 0 ? Math.max(0, Math.min(1, coverage)) : 0;
-        }
-        let angularMod = mod;
-        if (vis && rec?.rTab) {
-          const rev = Math.floor(turns);
-          const row = Math.max(0, Math.min(vis.rows - 1, rev));
-          const col = Math.floor(((phi < 0 ? phi + TAU : phi) / TAU) * vis.cols) % vis.cols;
-          angularMod = vis.data[row * vis.cols + col] / 255;
-        }
-        if (gapByBin[bin]) {
-          // Unmodulated shiny land between tracks appears darker
-          shade = 9 + grooveRing * 4;
-          roughness = 0.1 + grooveRing * 0.22;
-        } else {
-          // Heavily modulated grooves scatter more light
-          shade = hasSpiral
-            ? 9 + grooveRing * (16 + angularMod * 46)
-            : 15 + angularMod * 36 + grooveRing * (6 + angularMod * 14);
-          roughness = 0.1 + grooveRing * (0.34 + angularMod * 0.36);
-        }
-      } else {
-        // Lead-out / run-out mirror land with sparse spiral
-        const spiral = Math.sin((rMeters - R_LABEL) * 1400 - phi * 2);
-        shade = spiral > 0.92 ? 32 : 11;
-      }
-
-      // Outer rim bevel highlight
-      if (rMeters > R_LEADIN) {
-        shade = 18;
-      }
-
-      data[idx] = shade;
-      data[idx + 1] = shade;
-      data[idx + 2] = Math.min(255, Math.round(shade * 1.05));
-      data[idx + 3] = 255;
-      if (finish) {
-        finish[idx + 1] = Math.round(roughness * 255);
-        finish[idx + 2] = VINYL_METAL;
-      }
-    }
-  }
-
-  ctx.putImageData(img, 0, 0);
-  if (finishContext) finishContext.putImageData(finishImage, 0, 0);
 
   // Draw physical scratches across the groove surface
   if (scratches.length > 0) {
@@ -391,6 +336,7 @@ export function drawDiscSurfaceTexture(rec, vis, titles = [], meta = {}, targetC
   }
 
   // Composite crisp paper center label in the middle
+  const labelCanvas = drawLabel(titles, meta);
   const labelRadiusPx = (R_LABEL / R_DISC) * half;
   ctx.save();
   ctx.beginPath();
@@ -404,8 +350,7 @@ export function drawDiscSurfaceTexture(rec, vis, titles = [], meta = {}, targetC
     labelRadiusPx * 2
   );
   ctx.restore();
-
-  return canvas;
+  return true;
 }
 
 // Draws the 512x512 texture for the 1877 Edison Phonograph wax cylinder

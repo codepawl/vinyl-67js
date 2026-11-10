@@ -93,9 +93,21 @@ try {
   await page.waitForTimeout(2600);
   await press('[data-view="stylus"]');
   await rest();
+  await page.waitForTimeout(3500);
+  // Down to the groove itself with nothing but the mouse wheel: the groove is there in the same scene.
+  await glide(...at(0.72, 0.62), 600);
+  for (let notch = 0; notch < 88; notch++) {
+    await page.mouse.wheel(0, -50);
+    await page.waitForTimeout(80);
+  }
   await page.waitForTimeout(4500);
+  for (let notch = 0; notch < 30; notch++) {
+    await page.mouse.wheel(0, 150);
+    await page.waitForTimeout(50);
+  }
+  await page.waitForTimeout(600);
   await press('[data-view="overview"]');
-  await page.waitForTimeout(1800);
+  await page.waitForTimeout(2500);
 
   await press('[data-player="gramophone-1925"]');
   await rest();

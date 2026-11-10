@@ -11,7 +11,7 @@ import { cut } from './cut.js';
 import { press, makeVis, DEFAULT_CONDITION } from './press.js';
 import { demoTracks } from './demo.js';
 import { RECORDS, PLAYERS } from './records.js';
-import { TurntableRenderer67, LOOKS } from './render67.js';
+import { TurntableRenderer67, LOOKS, GROOVE_VIEW_ROWS, GROOVE_VIEW_COLUMNS, GROOVE_VIEW_SPAN } from './render67.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -35,9 +35,28 @@ function applyLookTone(lookName) {
   }
 }
 
+// The boot screen stays up until the machine is built and the first record's groove sheets are drawn, and
+// one frame of the finished scene has been shown behind it.
+const BOOT_GIVES_UP_AFTER_MILLISECONDS = 20000;
+const boot = { machineReady: false, recordReady: false, closed: false };
+function closeBootScreen() {
+  if (boot.closed) return;
+  boot.closed = true;
+  requestAnimationFrame(() => requestAnimationFrame(() => $('boot').classList.add('done')));
+}
+function markBootStep(step) {
+  boot[step] = true;
+  if (boot.machineReady && boot.recordReady) closeBootScreen();
+}
+setTimeout(closeBootScreen, BOOT_GIVES_UP_AFTER_MILLISECONDS);
+
 const renderer = new TurntableRenderer67(canvas, {
   look: activeLook,
-  onLoadingChange: (isLoading) => $('loading').classList.toggle('on', isLoading),
+  onLoadingChange: (isLoading, error) => {
+    $('loading').classList.toggle('on', isLoading);
+    if (error) closeBootScreen();
+    else if (!isLoading) markBootStep('machineReady');
+  },
 });
 applyLookTone(activeLook);
 window.vinylDebug = { renderer, LOOKS };
@@ -84,7 +103,7 @@ let tel = {
   nIn: 0, nOut: 0, loss: 0, peak: 0, cpu: 0,
   vtf: 1.8, antiskate: 1.8, rpm: RPM33,
 };
-let wallBuf = new Float32Array(5 * 160 * 2 + 2);
+let wallBuf = new Float32Array(GROOVE_VIEW_ROWS * GROOVE_VIEW_COLUMNS * 2 + 2);
 
 // --- Toast helper ---
 let toastTimer = 0;
@@ -253,7 +272,7 @@ async function ensureAudio() {
         }
       };
       node.connect(recordGainNode);
-      node.port.postMessage({ t: 'view', on: true });
+      node.port.postMessage({ t: 'view', on: true, rows: GROOVE_VIEW_ROWS, cols: GROOVE_VIEW_COLUMNS, span: GROOVE_VIEW_SPAN });
       if (currentRec) sendRecordToWorklet(currentRec);
       post({ t: 'set', o: { stylus: ui.stylus, vtf: ui.vtf, antiskate: ui.antiskate, volume: ui.volume, hum: ui.hum } });
       post({ t: 'speed', rpm: effectiveRpm() });
@@ -273,7 +292,7 @@ async function ensureAudio() {
         localEng.process(ev.outputBuffer.getChannelData(0), ev.outputBuffer.getChannelData(1), ev.outputBuffer.length);
         const dt = (performance.now() - t0) / ((ev.outputBuffer.length / actx.sampleRate) * 1000);
         tel = { ...localEng.telemetry(), cpu: dt, vtf: ui.vtf, antiskate: ui.antiskate, rpm: effectiveRpm() };
-        wallBuf = localEng.grooveView(5, 160, 400);
+        wallBuf = localEng.grooveView(GROOVE_VIEW_ROWS, GROOVE_VIEW_COLUMNS, GROOVE_VIEW_SPAN);
       };
       sp.connect(recordGainNode);
     }
@@ -353,6 +372,7 @@ function applyRecord(rec, vis, meta, saveCleanWalls = true) {
   localEng.setRecord(currentRec);
   sendRecordToWorklet(currentRec);
   renderer.setRecord(currentRec, currentVis, currentMeta);
+  renderer.sheetsSettled().then(() => markBootStep('recordReady'));
   applyRecordGain();
   $('now-title').textContent = currentMeta.title;
   $('now-dot').style.background = currentMeta.labelColor || currentMeta.color || '#7c1f22';
@@ -597,6 +617,9 @@ async function runRecordChange() {
   if (queuedRecordChange) return;
 
   if (renderer.hasDisc()) {
+    // The new record comes into view only once its grooves and label are on it.
+    await renderer.sheetsSettled();
+    if (queuedRecordChange) return;
     await animateDiscSwap(1, 0, 700);
     discSwapAmount = 0;
   }
@@ -913,6 +936,101 @@ let pendingHoverPoint = null;
 const hoverLock = { key: '', centre: null };
 // What the hover card last showed, so the page is only laid out again when the words change.
 const hoverCardShown = { title: '', state: '', how: '', width: 0, height: 0, left: '', top: '', points: '' };
+
+// --- Tooltip mode: on hover, always shown, or off ----------------------------------------------------------
+const TOOLTIP_MODES = ['hover', 'always', 'off'];
+const TOOLTIP_LABELS = { hover: 'Tips on hover', always: 'Tips pinned', off: 'Tips off' };
+const TOOLTIP_STORAGE_KEY = 'vinyl.tooltips';
+const PINNED_TIP_RISE = 16;          // how far a pinned label sits above its control, CSS pixels
+const PINNED_TIP_GAP = 4;
+let tooltipMode = 'hover';
+const pinnedTips = new Map();        // control id -> { chip, dot, title, state, words, width, height }
+
+function setTooltipMode(mode) {
+  tooltipMode = TOOLTIP_MODES.includes(mode) ? mode : 'hover';
+  $('tips-btn').dataset.mode = tooltipMode;
+  $('tips-btn').setAttribute('aria-label', TOOLTIP_LABELS[tooltipMode]);
+  $('tips-label').textContent = TOOLTIP_LABELS[tooltipMode];
+  try {
+    localStorage.setItem(TOOLTIP_STORAGE_KEY, tooltipMode);
+  } catch (error) {
+    // Private windows may refuse storage; the choice then lasts for this visit only.
+  }
+  if (tooltipMode === 'off') {
+    hoverCtx.clearRect(0, 0, hoverCanvas.width, hoverCanvas.height);
+    leaderSvg.classList.remove('on');
+    hoverCard.classList.remove('on');
+  }
+  if (tooltipMode !== 'always') hidePinnedTips();
+}
+
+function hidePinnedTips() {
+  for (const tip of pinnedTips.values()) {
+    tip.chip.classList.add('hidden');
+    tip.dot.classList.add('hidden');
+  }
+}
+
+function pinnedTipFor(control) {
+  let tip = pinnedTips.get(control.id);
+  if (tip) return tip;
+  const chip = document.createElement('div');
+  chip.className = 'tip-chip hidden';
+  const title = document.createElement('span');
+  const state = document.createElement('span');
+  state.className = 'tip-state';
+  chip.append(title, state);
+  const dot = document.createElement('div');
+  dot.className = 'tip-dot hidden';
+  $('tip-layer').append(dot, chip);
+  tip = { chip, dot, title, state, words: '', width: 0, height: 0 };
+  pinnedTips.set(control.id, tip);
+  return tip;
+}
+
+// One short label per control of the machine in view, nudged upwards where two would overlap.
+function updatePinnedTips() {
+  const viewWidth = canvas.clientWidth;
+  const viewHeight = canvas.clientHeight;
+  const anchors = renderer.controlAnchors(viewWidth, viewHeight).sort((first, second) => second.y - first.y);
+  const shown = new Set();
+  const placed = [];
+  for (const { control, x, y } of anchors) {
+    const tip = pinnedTipFor(control);
+    shown.add(control.id);
+    const liveState = getControlLiveState(control) || '';
+    const words = control.title + '|' + liveState;
+    if (words !== tip.words) {
+      tip.words = words;
+      tip.title.textContent = control.title;
+      tip.state.textContent = liveState;
+      tip.width = tip.chip.offsetWidth;
+      tip.height = tip.chip.offsetHeight;
+    }
+    const left = Math.max(4, Math.min(viewWidth - tip.width - 4, x - tip.width / 2));
+    let top = y - PINNED_TIP_RISE - tip.height;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const blocker = placed.find((other) => left < other.left + other.width + PINNED_TIP_GAP
+        && other.left < left + tip.width + PINNED_TIP_GAP
+        && top < other.top + other.height + PINNED_TIP_GAP
+        && other.top < top + tip.height + PINNED_TIP_GAP);
+      if (!blocker) break;
+      top = blocker.top - tip.height - PINNED_TIP_GAP;
+    }
+    placed.push({ left, top, width: tip.width, height: tip.height });
+    // The control under the pointer already has its full card.
+    const covered = hoveredControl === control;
+    tip.chip.classList.toggle('hidden', covered);
+    tip.dot.classList.toggle('hidden', covered);
+    tip.chip.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
+    tip.dot.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
+  }
+  for (const [id, tip] of pinnedTips) {
+    if (shown.has(id)) continue;
+    tip.chip.classList.add('hidden');
+    tip.dot.classList.add('hidden');
+  }
+}
 
 function clearHoverOverlay() {
   pendingHoverPoint = null;
@@ -1371,6 +1489,18 @@ window.addEventListener('keydown', (event) => {
 
 // Info Modal at Top-Left
 $('more-btn').addEventListener('click', () => $('info-backdrop').classList.add('open'));
+$('tips-btn').addEventListener('click', () => {
+  setTooltipMode(TOOLTIP_MODES[(TOOLTIP_MODES.indexOf(tooltipMode) + 1) % TOOLTIP_MODES.length]);
+});
+{
+  let storedTooltipMode = null;
+  try {
+    storedTooltipMode = localStorage.getItem(TOOLTIP_STORAGE_KEY);
+  } catch (error) {
+    storedTooltipMode = null;
+  }
+  setTooltipMode(storedTooltipMode || 'hover');
+}
 $('info-close').addEventListener('click', () => $('info-backdrop').classList.remove('open'));
 $('info-backdrop').addEventListener('click', (e) => {
   if (e.target.id === 'info-backdrop') $('info-backdrop').classList.remove('open');
@@ -1492,7 +1622,11 @@ window.addEventListener('drop', async (e) => {
 // --- Groove Microscope Oscilloscope at Bottom-Left ---
 const scopeCanvas = $('scope');
 const sctx = scopeCanvas.getContext('2d');
-const S_ROWS = 5, S_COLS = 160;
+const S_ROWS = GROOVE_VIEW_ROWS, S_COLS = GROOVE_VIEW_COLUMNS;
+const SCOPE_ROWS_EITHER_SIDE = 2;
+// The scope shows the middle half of the stretch the simulation hands over: about 4 mm either side of the needle.
+const SCOPE_FIRST_COLUMN = Math.round(S_COLS / 4);
+const SCOPE_LAST_COLUMN = Math.round((S_COLS * 3) / 4);
 
 function drawScope() {
   const w = scopeCanvas.width, h = scopeCanvas.height;
@@ -1501,17 +1635,17 @@ function drawScope() {
   const cy = h * 0.5;
   const half = (S_ROWS - 1) / 2;
 
-  for (let g = 0; g < S_ROWS; g++) {
+  for (let g = half - SCOPE_ROWS_EITHER_SIDE; g <= half + SCOPE_ROWS_EITHER_SIDE; g++) {
     const cur = g === half;
     sctx.strokeStyle = cur ? 'rgba(245, 194, 107, 0.90)' : 'rgba(236, 234, 228, 0.22)';
     sctx.lineWidth = cur ? 1.35 : 0.85;
     for (let side = 0; side < 2; side++) {
       sctx.beginPath();
       let started = false;
-      for (let c = 0; c < S_COLS; c++) {
+      for (let c = SCOPE_FIRST_COLUMN; c <= SCOPE_LAST_COLUMN; c++) {
         const v = wallBuf[(g * S_COLS + c) * 2 + side];
         if (v !== v) { started = false; continue; }
-        const x = (c / (S_COLS - 1)) * w;
+        const x = ((c - SCOPE_FIRST_COLUMN) / (SCOPE_LAST_COLUMN - SCOPE_FIRST_COLUMN)) * w;
         const y = cy - v * scaleY;
         if (!started) { sctx.moveTo(x, y); started = true; }
         else sctx.lineTo(x, y);
@@ -1580,9 +1714,10 @@ function frame() {
       antiskate: ui.antiskate,
       rpm: effectiveRpm(),
     };
-    wallBuf = localEng.grooveView(S_ROWS, S_COLS, 400);
+    wallBuf = localEng.grooveView(S_ROWS, S_COLS, GROOVE_VIEW_SPAN);
   }
 
+  renderer.setGrooveWalls(wallBuf);
   renderer.draw(tel);
   if (pendingHoverPoint) {
     const hadHover = !!hoveredControl;
@@ -1594,7 +1729,8 @@ function frame() {
       if (hadHover && !hoveredControl) clearHoverOverlay();
     }
   }
-  if (hoveredControl) updateHoverVisuals(hoveredControl);
+  if (hoveredControl && tooltipMode !== 'off') updateHoverVisuals(hoveredControl);
+  if (tooltipMode === 'always') updatePinnedTips();
   drawScope();
   checkRecordEnd();
   measureSeekLanding();
