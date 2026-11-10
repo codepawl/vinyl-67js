@@ -6,6 +6,8 @@ import { R_DISC, R_LEADIN, R_LOCK, R_LABEL, thetaForRadius } from './geometry.js
 
 const LABEL_SIZE = 1024;
 const DISC_TEX_SIZE = 1024;
+// +1 when the groove angle grows the same way round as the disc mesh's own angle, -1 when it runs the other way.
+const GROOVE_ANGLE_SIGN = 1;
 const SANS = '"Helvetica Neue", Helvetica, Arial, sans-serif';
 const SERIF = 'Georgia, "Times New Roman", serif';
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
@@ -176,7 +178,9 @@ export function drawLabel(titles = [], meta = {}, targetCanvas = null) {
 
 // Draws the complete 1024x1024 top-surface texture of the 12" vinyl disc:
 // includes the paper center label inside r < R_LABEL and the actual modulated spiral grooves outside.
-export function drawDiscSurfaceTexture(rec, vis, titles = [], meta = {}, targetCanvas = null) {
+// finishCanvas, when given, receives the surface finish in glTF layout (green = roughness, blue = metal):
+// the land between turns is a mirror, the groove walls scatter light, the paper label is matt.
+export function drawDiscSurfaceTexture(rec, vis, titles = [], meta = {}, targetCanvas = null, finishCanvas = null) {
   const canvas = targetCanvas || createSheet(DISC_TEX_SIZE);
   const ctx = canvas.getContext('2d');
   const size = canvas.width;
@@ -185,6 +189,19 @@ export function drawDiscSurfaceTexture(rec, vis, titles = [], meta = {}, targetC
   const labelCanvas = drawLabel(titles, meta);
   const img = ctx.createImageData(size, size);
   const data = img.data;
+  const finishContext = finishCanvas ? finishCanvas.getContext('2d') : null;
+  const finishImage = finishContext ? finishContext.createImageData(size, size) : null;
+  const finish = finishImage ? finishImage.data : null;
+  const PAPER_ROUGHNESS = 215;
+  const VINYL_METAL = 36;
+  if (finish) {
+    for (let offset = 0; offset < finish.length; offset += 4) {
+      finish[offset] = 255;
+      finish[offset + 1] = PAPER_ROUGHNESS;
+      finish[offset + 2] = 0;
+      finish[offset + 3] = 255;
+    }
+  }
 
   // Build radial lookup table for groove pitch and average modulation per radius
   const bins = 512;
@@ -219,6 +236,29 @@ export function drawDiscSurfaceTexture(rec, vis, titles = [], meta = {}, targetC
 
   const scratches = rec?.scratches || [];
   const dustLevel = rec?.condition?.dust ?? 0.25;
+
+  // The real spiral: how many turns in the groove is at each radius, and how far apart the turns are there.
+  // With these the texture draws every turn of the groove where the cutter put it, so the needle is seen
+  // riding the same groove the simulation plays.
+  const turnSamples = 8192;
+  const turnsByRadius = new Float32Array(turnSamples);
+  const pitchByRadius = new Float32Array(turnSamples);
+  const hasSpiral = !!(rec && rec.rTab);
+  if (hasSpiral) {
+    for (let index = 0; index < turnSamples; index++) {
+      const radius = rLo + ((rHi - rLo) * index) / (turnSamples - 1);
+      turnsByRadius[index] = thetaForRadius(rec.rTab, radius) / TAU;
+    }
+    const radiusStep = (rHi - rLo) / (turnSamples - 1);
+    for (let index = 0; index < turnSamples; index++) {
+      const before = turnsByRadius[Math.max(0, index - 4)];
+      const after = turnsByRadius[Math.min(turnSamples - 1, index + 4)];
+      const turnsPerMetre = Math.abs(after - before) / (8 * radiusStep);
+      pitchByRadius[index] = turnsPerMetre > 1 ? 1 / turnsPerMetre : 0;
+    }
+  }
+  const grooveWidth = rec?.W || 56e-6;
+  const pixelMetres = R_DISC / half;
 
   for (let y = 0; y < size; y++) {
     const dy = (y + 0.5 - half) / half;
@@ -259,13 +299,29 @@ export function drawDiscSurfaceTexture(rec, vis, titles = [], meta = {}, targetC
       const bin = Math.max(0, Math.min(bins - 1, Math.floor(u * (bins - 1))));
 
       let shade = 14; // base deep black PVC
+      let roughness = 0.1;
       if (rMeters >= R_LOCK && rMeters <= R_LEADIN) {
         const mod = modByBin[bin];
         // Fine concentric groove rings + angular modulation variation
-        const grooveRing = 0.5 + 0.5 * Math.sin(rMeters * 26500 + phi);
+        let grooveRing = 0.5 + 0.5 * Math.sin(rMeters * 26500 + phi);
+        let turns = 0;
+        if (hasSpiral) {
+          const position = Math.max(0, Math.min(turnSamples - 1.001, u * (turnSamples - 1)));
+          const sample = Math.floor(position);
+          const blend = position - sample;
+          turns = turnsByRadius[sample] + (turnsByRadius[sample + 1] - turnsByRadius[sample]) * blend;
+          const pitch = pitchByRadius[sample];
+          // Angle of this point on the disc, counted the way the groove angle is counted.
+          const discAngle = Math.atan2(-dy, dx) * GROOVE_ANGLE_SIGN;
+          let offset = turns - discAngle / TAU;
+          offset -= Math.round(offset);
+          const metresFromGroove = Math.abs(offset) * pitch;
+          const coverage = (grooveWidth / 2 - metresFromGroove) / pixelMetres + 0.5;
+          grooveRing = pitch > 0 ? Math.max(0, Math.min(1, coverage)) : 0;
+        }
         let angularMod = mod;
         if (vis && rec?.rTab) {
-          const rev = Math.floor(thetaForRadius(rec.rTab, rMeters) / TAU);
+          const rev = Math.floor(turns);
           const row = Math.max(0, Math.min(vis.rows - 1, rev));
           const col = Math.floor(((phi < 0 ? phi + TAU : phi) / TAU) * vis.cols) % vis.cols;
           angularMod = vis.data[row * vis.cols + col] / 255;
@@ -273,9 +329,13 @@ export function drawDiscSurfaceTexture(rec, vis, titles = [], meta = {}, targetC
         if (gapByBin[bin]) {
           // Unmodulated shiny land between tracks appears darker
           shade = 9 + grooveRing * 4;
+          roughness = 0.1 + grooveRing * 0.22;
         } else {
           // Heavily modulated grooves scatter more light
-          shade = 15 + angularMod * 36 + grooveRing * (6 + angularMod * 14);
+          shade = hasSpiral
+            ? 9 + grooveRing * (16 + angularMod * 46)
+            : 15 + angularMod * 36 + grooveRing * (6 + angularMod * 14);
+          roughness = 0.1 + grooveRing * (0.34 + angularMod * 0.36);
         }
       } else {
         // Lead-out / run-out mirror land with sparse spiral
@@ -292,16 +352,21 @@ export function drawDiscSurfaceTexture(rec, vis, titles = [], meta = {}, targetC
       data[idx + 1] = shade;
       data[idx + 2] = Math.min(255, Math.round(shade * 1.05));
       data[idx + 3] = 255;
+      if (finish) {
+        finish[idx + 1] = Math.round(roughness * 255);
+        finish[idx + 2] = VINYL_METAL;
+      }
     }
   }
 
   ctx.putImageData(img, 0, 0);
+  if (finishContext) finishContext.putImageData(finishImage, 0, 0);
 
   // Draw physical scratches across the groove surface
   if (scratches.length > 0) {
     ctx.save();
     ctx.strokeStyle = 'rgba(215, 208, 195, 0.42)';
-    ctx.lineWidth = 1.25;
+    ctx.lineWidth = 1.25 * size / 2048;
     for (const s of scratches.slice(0, 12)) {
       const r0 = (s.r0 / R_DISC) * half;
       const r1 = (s.r1 / R_DISC) * half;
@@ -321,7 +386,7 @@ export function drawDiscSurfaceTexture(rec, vis, titles = [], meta = {}, targetC
     for (let i = 0; i < count; i++) {
       const r = (R_LABEL + 0.005 + Rdust() * (R_LEADIN - R_LABEL - 0.008)) / R_DISC * half;
       const a = Rdust() * TAU;
-      ctx.fillRect(half + r * Math.cos(a), half + r * Math.sin(a), 1.3, 1.3);
+      ctx.fillRect(half + r * Math.cos(a), half + r * Math.sin(a), 1.3 * size / 2048, 1.3 * size / 2048);
     }
   }
 

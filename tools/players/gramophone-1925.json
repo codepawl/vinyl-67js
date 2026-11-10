@@ -6,7 +6,10 @@
   "defaultGroup": "gr_body",
   "stretch": { "gr_arm": { "pivotX": 1.33, "jointX": 0.67, "factor": 1.25 } },
   "groups": [
-    { "name": "gr_crank", "rules": [{ "within": [[-0.13, -2.0, -0.7], [0.13, -0.94, 0.0]] }] },
+    { "name": "gr_crank", "rules": [
+      { "within": [[-0.13, -2.0, -0.7], [0.13, -1.2, 0.0]] },
+      { "within": [[-0.13, -2.0, -0.7], [0.13, -0.94, 0.0]], "minSize": [0.0, 0.3, 0.0] }
+    ] },
     { "name": "gr_arm", "rules": [
       { "sources": [1], "centre": [[0.3, -0.25, 0.1], [1.34, 0.25, 0.62]] },
       { "sources": [2], "centre": [[0.4, -0.26, 0.25], [0.7, -0.12, 0.56]] }

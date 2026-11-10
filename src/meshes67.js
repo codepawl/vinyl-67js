@@ -467,7 +467,7 @@ export const MATERIALS = {
 };
 
 // --- Disc mesh with UV mapping and warp capability ---
-export function buildDiscPart(name, discTextureDescriptor) {
+export function buildDiscPart(name, discTextureDescriptor, discFinishDescriptor) {
   const b = new MeshBuilder67();
   const rRings = 44, thSegs = 128;
   const rMin = 0.0036, rMax = R_DISC;
@@ -505,13 +505,15 @@ export function buildDiscPart(name, discTextureDescriptor) {
 
   const part = b.toPart(name, {
     color: [0.92, 0.92, 0.94],
-    roughness: 0.20,
-    metallic: 0.14,
+    // The finish map carries roughness and metal per point, so these factors stay at one.
+    roughness: discFinishDescriptor ? 1 : 0.2,
+    metallic: discFinishDescriptor ? 1 : 0.14,
+    metallicRoughnessMap: discFinishDescriptor,
     // No anisotropy: its highlight is tied to the disc and swept the whole surface white twice a turn.
     anisotropy: 0,
     iridescence: 0.36,
     iridescenceIOR: 1.48,
-    clearcoat: 0.58,
+    clearcoat: 0.12,
     clearcoatRoughness: 0.14,
     map: discTextureDescriptor,
   }, true);
@@ -1188,4 +1190,62 @@ export function buildDirectDrive1979(discTextureDescriptor) {
   parts.push(bCWReal.toPart('dd_counterweight', MATERIALS.chromeMirror));
 
   return parts;
+}
+
+// A round cable laid along a path of physical points [x, y, z] (metres), smoothed between them.
+export function buildCablePart(name, pathPoints, radius, material) {
+  const builder = new MeshBuilder67();
+  const stepsPerSpan = 10;
+  const sides = 10;
+  const centres = [];
+  const pointAt = (index) => pathPoints[Math.max(0, Math.min(pathPoints.length - 1, index))];
+  for (let span = 0; span < pathPoints.length - 1; span++) {
+    const [before, start, end, after] = [pointAt(span - 1), pointAt(span), pointAt(span + 1), pointAt(span + 2)];
+    const lastStep = span === pathPoints.length - 2 ? stepsPerSpan : stepsPerSpan - 1;
+    for (let step = 0; step <= lastStep; step++) {
+      const t = step / stepsPerSpan;
+      const centre = [0, 1, 2].map((axis) => 0.5 * (
+        2 * start[axis]
+        + (end[axis] - before[axis]) * t
+        + (2 * before[axis] - 5 * start[axis] + 4 * end[axis] - after[axis]) * t * t
+        + (3 * start[axis] - before[axis] - 3 * end[axis] + after[axis]) * t * t * t
+      ));
+      centres.push(centre);
+    }
+  }
+  const normalise = (vector) => {
+    const length = Math.hypot(vector[0], vector[1], vector[2]) || 1;
+    return [vector[0] / length, vector[1] / length, vector[2] / length];
+  };
+  const cross = (first, second) => [
+    first[1] * second[2] - first[2] * second[1],
+    first[2] * second[0] - first[0] * second[2],
+    first[0] * second[1] - first[1] * second[0],
+  ];
+  for (let ring = 0; ring < centres.length; ring++) {
+    const previous = centres[Math.max(0, ring - 1)];
+    const next = centres[Math.min(centres.length - 1, ring + 1)];
+    const forward = normalise([next[0] - previous[0], next[1] - previous[1], next[2] - previous[2]]);
+    const reference = Math.abs(forward[2]) > 0.9 ? [1, 0, 0] : [0, 0, 1];
+    const sideways = normalise(cross(forward, reference));
+    const upward = cross(sideways, forward);
+    for (let side = 0; side < sides; side++) {
+      const angle = (side / sides) * TAU;
+      const outward = [0, 1, 2].map((axis) => sideways[axis] * Math.cos(angle) + upward[axis] * Math.sin(angle));
+      builder.v(
+        centres[ring][0] + outward[0] * radius,
+        centres[ring][1] + outward[1] * radius,
+        centres[ring][2] + outward[2] * radius,
+        outward[0], outward[1], outward[2],
+      );
+    }
+  }
+  for (let ring = 0; ring < centres.length - 1; ring++) {
+    for (let side = 0; side < sides; side++) {
+      const nextSide = (side + 1) % sides;
+      const corner = ring * sides + side;
+      builder.quad(corner, ring * sides + nextSide, (ring + 1) * sides + nextSide, corner + sides);
+    }
+  }
+  return builder.toPart(name, material);
 }

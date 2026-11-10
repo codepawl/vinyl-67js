@@ -16,7 +16,7 @@ import '../67js/camera-effects.js';
 import { TAU } from './dsp.js';
 import { R_DISC, R_PROGRAM, R_PROGRAM_MIN, ALPHA_REST, stylusXY } from './geometry.js';
 import { drawDiscSurfaceTexture } from './label.js';
-import { physTo67, mat4Identity, transformPointMat4, buildDiscPart, applyDiscWarpToPart } from './meshes67.js';
+import { physTo67, mat4Identity, transformPointMat4, buildDiscPart, applyDiscWarpToPart, buildCablePart, MATERIALS } from './meshes67.js';
 
 const PHONOGRAPH = 'phonograph-1877';
 const GRAMOPHONE = 'gramophone-1925';
@@ -560,6 +560,10 @@ function smoothStep(amount) {
   return amount * amount * (3 - 2 * amount);
 }
 
+const MAINS_CABLE_RADIUS = 0.0032;
+// Camera distance in metres under which the background starts to fall out of focus.
+const CLOSE_UP_DISTANCE = 0.5;
+
 export class TurntableRenderer67 {
   constructor(canvas, options = {}) {
     this.canvas = canvas;
@@ -567,9 +571,15 @@ export class TurntableRenderer67 {
     this.onLoadingChange = options.onLoadingChange || (() => {});
 
     this.discCanvas = document.createElement('canvas');
-    this.discCanvas.width = 2048;
-    this.discCanvas.height = 2048;
+    // 4096 px puts a pixel every 73 micrometres, about one groove wide; phones keep the lighter sheet.
+    const discTextureSize = Math.min(window.innerWidth, window.innerHeight) < 700 ? 2048 : 4096;
+    this.discCanvas.width = discTextureSize;
+    this.discCanvas.height = discTextureSize;
     this.discTextureDesc = { image: this.discCanvas, colorSpace: 'srgb', wrapS: 33071, wrapT: 33071 };
+    this.discFinishCanvas = document.createElement('canvas');
+    this.discFinishCanvas.width = discTextureSize;
+    this.discFinishCanvas.height = discTextureSize;
+    this.discFinishDesc = { image: this.discFinishCanvas, colorSpace: 'linear', wrapS: 33071, wrapT: 33071 };
     this.lastRecordArgs = null;
 
     this.controlById = new Map(INTERACTIVE_CONTROLS.map((control) => [control.id, control]));
@@ -651,7 +661,7 @@ export class TurntableRenderer67 {
 
     let discPart = null;
     if (definition.hasDisc) {
-      discPart = buildDiscPart('disc', this.discTextureDesc);
+      discPart = buildDiscPart('disc', this.discTextureDesc, this.discFinishDesc);
       discPart.localBounds = localBoundsOf(discPart.geometry.positions);
       groups.set('disc', [discPart]);
       machineParts.push(discPart);
@@ -659,6 +669,25 @@ export class TurntableRenderer67 {
 
     const floorPart = buildFloorPart(look, definition.floorZ);
     const parts = [...machineParts, floorPart];
+    // Only the 1979 deck runs on mains: the phonograph is cranked by hand and the gramophone by a spring.
+    if (playerId === DIRECT_DRIVE) {
+      const floor = definition.floorZ + MAINS_CABLE_RADIUS;
+      const cablePart = buildCablePart('dd_mains_cable', [
+        [-0.105, 0.168, -0.062],
+        [-0.105, 0.2, -0.064],
+        [-0.108, 0.235, floor + 0.012],
+        [-0.125, 0.275, floor],
+        [-0.19, 0.33, floor],
+        [-0.3, 0.36, floor],
+        [-0.42, 0.345, floor],
+        [-0.56, 0.37, floor],
+        [-0.75, 0.46, floor],
+        [-1.0, 0.62, floor],
+        [-1.5, 0.9, floor],
+      ], MAINS_CABLE_RADIUS, MATERIALS.rubberMat);
+      cablePart.matrix = mat4Identity();
+      parts.push(cablePart);
+    }
 
     // Machine bounds in 67js space, for framing and shadows.
     const bounds = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
@@ -682,6 +711,7 @@ export class TurntableRenderer67 {
     };
     const renderer = new Renderer67(this.canvas, parts, {
       hdr: true,
+      depth: true,
       samples: 4,
       pixelRatio: renderPixelRatio(),
       ground: false,
@@ -839,10 +869,13 @@ export class TurntableRenderer67 {
       inkColor: meta?.inkColor || meta?.ink || '#e6c98a',
       playerEra: this.activePlayer,
     };
-    drawDiscSurfaceTexture(rec, vis, titles.length ? titles : [labelMeta.albumTitle], labelMeta, this.discCanvas);
+    drawDiscSurfaceTexture(rec, vis, titles.length ? titles : [labelMeta.albumTitle], labelMeta, this.discCanvas, this.discFinishCanvas);
     const stage = this.stage;
     if (!stage || !stage.discPart) return;
-    if (typeof stage.renderer.updateTexture === 'function') stage.renderer.updateTexture(this.discTextureDesc);
+    if (typeof stage.renderer.updateTexture === 'function') {
+      stage.renderer.updateTexture(this.discTextureDesc);
+      stage.renderer.updateTexture(this.discFinishDesc);
+    }
     const positions = applyDiscWarpToPart(stage.discPart, rec);
     updatePartVertices(stage.renderer, stage.discPart, positions, stage.discPart.geometry.normals);
   }
@@ -1047,8 +1080,18 @@ export class TurntableRenderer67 {
       far: 12,
       exposure: look.exposure,
       environment: { ...stage.environment, pointLights },
-      effects: look.effects,
+      effects: this.frameEffects(look),
     });
+  }
+
+  // The look's grade plus what depends on the shot: contact shading, a little film grain, and a shallow
+  // focus that only sets in when the camera comes close, the way a lens behaves near its subject.
+  frameEffects(look) {
+    const distance = this.cam.dist;
+    const closeness = Math.max(0, Math.min(1, (CLOSE_UP_DISTANCE - distance) / CLOSE_UP_DISTANCE));
+    const effects = { ...look.effects, ambientOcclusion: 0.5, grain: 0.012 };
+    if (closeness > 0.02) effects.depthOfField = { blur: 0.014 * closeness, focusDistance: distance };
+    return effects;
   }
 
   computeViewProj(eye, target, fovDeg, aspect) {
