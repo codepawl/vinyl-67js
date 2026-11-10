@@ -28,6 +28,7 @@ const DIRECT_DRIVE = 'direct-drive-1979';
 export const INTERACTIVE_CONTROLS = [
   {
     id: 'ph-crank',
+    turns: true,
     player: PHONOGRAPH,
     groups: ['ph_shaft'],
     title: 'Hand crank and feed screw',
@@ -35,6 +36,7 @@ export const INTERACTIVE_CONTROLS = [
   },
   {
     id: 'ph-cylinder',
+    turns: true,
     player: PHONOGRAPH,
     groups: ['ph_drum'],
     title: 'Tinfoil drum',
@@ -64,6 +66,7 @@ export const INTERACTIVE_CONTROLS = [
 
   {
     id: 'gr-crank',
+    turns: true,
     player: GRAMOPHONE,
     groups: ['gr_crank'],
     title: 'Winding crank',
@@ -78,6 +81,7 @@ export const INTERACTIVE_CONTROLS = [
   },
   {
     id: 'gr-disc',
+    turns: true,
     player: GRAMOPHONE,
     groups: ['disc', 'gr_platter'],
     title: 'Record and felt turntable',
@@ -107,6 +111,7 @@ export const INTERACTIVE_CONTROLS = [
   },
   {
     id: 'dd-strobe',
+    turns: true,
     player: DIRECT_DRIVE,
     groups: ['dd_strobe'],
     title: 'Power dial and strobe',
@@ -170,6 +175,7 @@ export const INTERACTIVE_CONTROLS = [
   },
   {
     id: 'dd-disc',
+    turns: true,
     player: DIRECT_DRIVE,
     groups: ['disc', 'dd_platter'],
     title: 'Record and platter',
@@ -839,6 +845,13 @@ export class TurntableRenderer67 {
     if (typeof stage.renderer.updateTexture === 'function') stage.renderer.updateTexture(this.discTextureDesc);
     const positions = applyDiscWarpToPart(stage.discPart, rec);
     updatePartVertices(stage.renderer, stage.discPart, positions, stage.discPart.geometry.normals);
+  }
+
+  // Changes whenever the view does, so anything pinned to the screen knows when to let go.
+  cameraKey() {
+    const basis = this.camBasis;
+    if (!basis) return '';
+    return [basis.eye[0], basis.eye[1], basis.eye[2], basis.fx, basis.fy, basis.fz, basis.fovDeg].map((value) => value.toFixed(3)).join(',');
   }
 
   // --- Changing the record -------------------------------------------------------------------------------

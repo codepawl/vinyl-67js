@@ -4,7 +4,7 @@
 import { TAU } from './dsp.js';
 import {
   RPM33, R_DISC, R_LEADIN, R_LOCK, R_LABEL, R_PROGRAM, R_PROGRAM_MIN,
-  PIVOT_X, PIVOT_Y, ALPHA_REST, ALPHA_MIN, alphaForRadius, stylusXY,
+  PIVOT_X, PIVOT_Y, ALPHA_REST, ALPHA_MIN, alphaForRadius, stylusXY, grooveRadius,
 } from './geometry.js';
 import { Engine } from './engine.js';
 import { cut } from './cut.js';
@@ -108,6 +108,7 @@ function updateStatusPill() {
   if (shown === statusPillShown) return;
   statusPillShown = shown;
   eq.classList.toggle('playing', playing);
+  $('play-btn').classList.toggle('playing', playing);
 
   if (playing) {
     // Green filled play circle
@@ -141,9 +142,11 @@ function buildEraFilterChain(ctx) {
   hp.connect(peak1);
   peak1.connect(peak2);
   peak2.connect(lp);
-  lp.connect(output);
+  const mono = ctx.createGain();
+  lp.connect(mono);
+  mono.connect(output);
 
-  const chain = { input, output, hp, peak1, peak2, lp };
+  const chain = { input, output, hp, peak1, peak2, lp, mono };
   configureEraAcoustics(chain);
   return chain;
 }
@@ -151,6 +154,10 @@ function buildEraFilterChain(ctx) {
 function configureEraAcoustics(chain = eraFilterChain) {
   if (!chain || !actx) return;
   const now = actx.currentTime;
+  // A horn machine has a single sound path, so its two channels are summed; the 1979 deck stays stereo.
+  const stereo = acousticsMode === 'direct' || activePlayerId === 'direct-drive-1979';
+  chain.mono.channelCountMode = stereo ? 'max' : 'explicit';
+  chain.mono.channelCount = stereo ? 2 : 1;
   if (acousticsMode === 'direct' || activePlayerId === 'direct-drive-1979') {
     chain.hp.type = 'highpass';
     chain.hp.frequency.setTargetAtTime(18, now, 0.02);
@@ -650,6 +657,73 @@ async function selectRecord(item, autoPlay = false) {
   }
 }
 
+function isPlaying() {
+  return ui.motor && !tel.cueUp && tel.r <= R_LEADIN + 0.004 && tel.r >= R_LOCK - 0.004;
+}
+
+// Skipping lifts the needle and sets it down in the groove that many seconds away, as a hand would.
+// Presses made while the arm is still travelling add to the place it is heading for.
+const SEEK_TRAVEL_MILLISECONDS = 2500;
+let seekTargetTheta = 0;
+let seekStartedAt = -Infinity;
+// The lowered needle settles a little outside the spot the arm was aimed at. Each landing is measured and
+// the next aim is moved by what was learned, so a skip lands on the second it was asked for.
+let seekRadiusBias = 0.0015;
+let seekAwaitingLanding = false;
+let seekLandedAt = 0;
+function measureSeekLanding() {
+  if (!seekAwaitingLanding || !currentRec) return;
+  if (tel.cueUp || tel.auto) {
+    seekLandedAt = 0;
+    return;
+  }
+  const now = performance.now();
+  if (!seekLandedAt) seekLandedAt = now;
+  const settledSeconds = (now - seekLandedAt) / 1000;
+  if (settledSeconds < 0.8) return;
+  seekAwaitingLanding = false;
+  if (!isPlaying()) return;
+  const expectedTheta = Math.min(currentRec.thetaEnd, seekTargetTheta + settledSeconds * (RPM33 / 60) * TAU);
+  const miss = grooveRadius(currentRec.rTab, tel.theta) - grooveRadius(currentRec.rTab, expectedTheta);
+  seekRadiusBias = Math.max(-0.003, Math.min(0.003, seekRadiusBias + miss));
+  window.vinylDebug.lastSeek = { miss, bias: seekRadiusBias };
+}
+function seekBySeconds(seconds) {
+  if (!currentRec || recordChangeRunning) return;
+  const armIsTravelling = performance.now() - seekStartedAt < SEEK_TRAVEL_MILLISECONDS;
+  if (!armIsTravelling && !isPlaying()) {
+    startPlayback();
+    return;
+  }
+  const turnsPerSecond = RPM33 / 60;
+  const from = armIsTravelling ? seekTargetTheta : tel.theta;
+  seekTargetTheta = Math.max(0, Math.min(currentRec.thetaEnd, from + seconds * turnsPerSecond * TAU));
+  seekStartedAt = performance.now();
+  ui.cueUp = false;
+  seekAwaitingLanding = true;
+  seekLandedAt = 0;
+  post({ t: 'cueTo', al: alphaForRadius(grooveRadius(currentRec.rTab, seekTargetTheta) - seekRadiusBias) });
+}
+
+// When a side runs out the needle circles the locked groove for a moment, then the next record goes on.
+const RUN_OUT_MILLISECONDS = 2500;
+let runOutSince = 0;
+function checkRecordEnd() {
+  const inRunOut = ui.motor && !tel.cueUp && tel.r <= R_LOCK + 0.003 && !recordChangeRunning && !dragMode;
+  if (!inRunOut) {
+    runOutSince = 0;
+    return;
+  }
+  const now = performance.now();
+  if (!runOutSince) runOutSince = now;
+  if (now - runOutSince < RUN_OUT_MILLISECONDS) return;
+  runOutSince = 0;
+  const index = RECORDS.findIndex((record) => record.id === activeRecId);
+  const next = RECORDS[(index + 1) % RECORDS.length];
+  showToast(`Record finished. Next: ${next.title}`, 4000);
+  changeRecord(next, true);
+}
+
 function cycleRecord(step = 1) {
   const idx = RECORDS.findIndex((r) => r.id === activeRecId);
   const nextIdx = (idx + step + RECORDS.length) % RECORDS.length;
@@ -836,6 +910,7 @@ function getControlLiveState(ctrl) {
 // --- Non-Occluding Circle-Dot Leader Line & Tooltip Positioning ---
 let hoveredControl = null;
 let pendingHoverPoint = null;
+const hoverLock = { key: '', centre: null };
 // What the hover card last showed, so the page is only laid out again when the words change.
 const hoverCardShown = { title: '', state: '', how: '', width: 0, height: 0, left: '', top: '', points: '' };
 
@@ -913,6 +988,17 @@ function updateHoverVisuals(ctrl) {
   }
   const cardWidth = hoverCardShown.width;
   const cardHeight = hoverCardShown.height;
+  const lockKey = `${ctrl.id} ${renderer.cameraKey()} ${cssW}x${cssH} ${cardWidth}x${cardHeight}`;
+  // The machine's own outline also shifts while it plays (the phonograph's carriage travels), and the card
+  // is placed against that outline, so it is held as well.
+  if (hoverLock.key === lockKey) {
+    info.machineBounds = hoverLock.machineBounds;
+    if (ctrl.turns) info.centre = hoverLock.centre;
+  } else {
+    hoverLock.key = lockKey;
+    hoverLock.centre = info.centre;
+    hoverLock.machineBounds = info.machineBounds;
+  }
   const place = hoverCardPlacement(info.centre, info.machineBounds, cardWidth, cardHeight, cssW, cssH);
 
   // The leader starts on the part with a round dot and ends on the card edge that faces the part.
@@ -1249,6 +1335,10 @@ $('settings-btn').addEventListener('click', (e) => {
 });
 
 $('next-rec-btn').addEventListener('click', () => cycleRecord(1));
+$('prev-rec-btn').addEventListener('click', () => cycleRecord(-1));
+$('play-btn').addEventListener('click', () => toggleCue());
+$('back-btn').addEventListener('click', () => seekBySeconds(-5));
+$('forward-btn').addEventListener('click', () => seekBySeconds(5));
 
 // Era Tabs at Top-Center
 for (const btn of document.querySelectorAll('.era-tab')) {
@@ -1506,6 +1596,8 @@ function frame() {
   }
   if (hoveredControl) updateHoverVisuals(hoveredControl);
   drawScope();
+  checkRecordEnd();
+  measureSeekLanding();
   updateHUD();
   updateStatusPill();
   requestAnimationFrame(frame);
@@ -1528,3 +1620,4 @@ window.vinylDebug.records = RECORDS;
 window.vinylDebug.changeRecord = changeRecord;
 window.vinylDebug.telemetry = () => tel;
 window.vinylDebug.recordChangeRunning = () => recordChangeRunning;
+window.vinylDebug.seekBySeconds = seekBySeconds;

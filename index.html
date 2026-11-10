@@ -64,6 +64,12 @@
     transition: color 0.15s ease, background 0.15s ease;
   }
   .quiet:hover { color: var(--ink); background: var(--fill); }
+  .quiet .ic { flex: none; }
+  .quiet.icon-only { padding: 0 8px; gap: 3px; }
+  .quiet .skip-amount { font: 11px var(--mono); }
+  #transport { display: flex; align-items: center; gap: 0; margin-right: 4px; }
+  #play-btn .pause-shape, #play-btn.playing .play-shape { display: none; }
+  #play-btn.playing .pause-shape { display: inline; }
   .quiet.active, .quiet.open { color: var(--ink); background: var(--fill-strong); }
 
   .corner { position: fixed; display: flex; align-items: center; gap: 2px; z-index: 5; }
@@ -143,13 +149,13 @@
   /* Specs, bottom left */
   #hud {
     position: fixed; left: var(--edge); bottom: var(--edge); z-index: 4;
-    width: 268px; padding: 10px 12px 11px;
+    width: 300px; padding: 12px 16px 13px;
     background: var(--panel); color: var(--panel-ink);
     border-radius: 12px; backdrop-filter: blur(14px);
     font: 11.5px/1.5 var(--mono); font-variant-numeric: tabular-nums;
   }
   #scope { display: block; width: 100%; height: 44px; margin-bottom: 8px; border-radius: 6px; background: rgba(0, 0, 0, 0.35); }
-  #stats { display: grid; grid-template-columns: 1fr 1fr; column-gap: 14px; row-gap: 1px; }
+  #stats { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: 20px; row-gap: 1px; }
   .stat { display: flex; justify-content: space-between; gap: 8px; white-space: nowrap; }
   .stat span:first-child { color: var(--panel-soft); }
   #hud-toggle { display: none; }
@@ -189,9 +195,14 @@
   #info-close:hover { background: var(--panel-fill); }
 
   /* Between phone and wide desktop the record title gives way so it never runs under the era tabs. */
-  @media (max-width: 1280px) {
-    #now-btn { max-width: 210px; }
+  @media (max-width: 1500px) {
+    #now-btn { max-width: 200px; }
     #now-time { display: none; }
+  }
+  @media (max-width: 1280px) {
+    #now-btn { max-width: 150px; }
+    #transport .skip, #prev-rec-btn { display: none; }
+    #settings-btn { font-size: 0; gap: 0; padding: 0 8px; }
   }
 
   @media (max-width: 860px) {
@@ -200,13 +211,15 @@
     .era-tab { padding: 0 9px; }
     .era-tab .name-long { display: none; }
     #status-text { display: none; }
-    #now-btn { max-width: 190px; }
+    #now-btn { max-width: 150px; }
     #now-time { display: none; }
+    #more-btn { font-size: 0; gap: 0; padding: 0 8px; }
+    #bottom-right .quiet { font-size: 0; gap: 0; padding: 0 9px; }
     .dropdown { top: 88px; max-height: calc(100dvh - 100px - var(--edge)); }
     #hud { width: auto; right: auto; padding: 8px 10px; }
     #hud #scope, #hud .extra { display: none; }
     #stats { grid-template-columns: auto; }
-    #hud.open { width: min(268px, calc(100vw - 2 * var(--edge))); }
+    #hud.open { width: min(300px, calc(100vw - 2 * var(--edge))); }
     #hud.open #scope { display: block; }
     #hud.open .extra { display: flex; }
     #hud.open #stats { grid-template-columns: 1fr 1fr; }
@@ -248,7 +261,7 @@
     <svg id="status-icon" viewBox="0 0 16 16" fill="none"></svg>
     <span id="status-text">Stopped</span>
   </div>
-  <button class="quiet" id="more-btn" type="button">About</button>
+  <button class="quiet" id="more-btn" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M8 7.3v3.9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="8" cy="4.9" r="0.9"/></svg>About</button>
 </div>
 
 <nav id="era-tabs" class="corner" aria-label="Record player by era">
@@ -258,16 +271,20 @@
 </nav>
 
 <div id="top-right" class="corner">
+  <div id="transport" role="group" aria-label="Playback">
+    <button class="quiet icon-only" id="prev-rec-btn" type="button" title="Previous record" aria-label="Previous record"><svg class="ic" width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M13.5 3.2v9.6L6.4 8zM3 3h2v10H3z"/></svg></button>
+    <button class="quiet icon-only skip" id="back-btn" type="button" title="Back 5 seconds" aria-label="Back 5 seconds"><svg class="ic" width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8.2 3.4v9.2L2 8zM14.4 3.4v9.2L8.2 8z"/></svg><span class="skip-amount">5</span></button>
+    <button class="quiet icon-only" id="play-btn" type="button" title="Play or pause" aria-label="Play or pause"><svg class="ic" width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path class="play-shape" d="M4.5 2.8v10.4L13 8z"/><path class="pause-shape" d="M4 3h3v10H4zM9 3h3v10H9z"/></svg></button>
+    <button class="quiet icon-only skip" id="forward-btn" type="button" title="Forward 5 seconds" aria-label="Forward 5 seconds"><span class="skip-amount">5</span><svg class="ic" width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M7.8 3.4v9.2L14 8zM1.6 3.4v9.2L7.8 8z"/></svg></button>
+    <button class="quiet icon-only" id="next-rec-btn" type="button" title="Next record" aria-label="Next record"><svg class="ic" width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M2.5 3.2v9.6L9.6 8zM11 3h2v10h-2z"/></svg></button>
+  </div>
   <button class="quiet" id="now-btn" type="button" title="Choose a record">
     <span id="now-dot" style="background:#c84b31"></span>
     <span class="eq" id="now-eq"><i></i><i></i><i></i></span>
     <span id="now-title">Rhapsody in Blue (1924)</span>
     <span id="now-time">0:00</span>
   </button>
-  <button class="quiet" id="next-rec-btn" type="button" title="Next record" aria-label="Next record">
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M2.5 3.2v9.6L9.6 8zM11 3h2v10h-2z"/></svg>
-  </button>
-  <button class="quiet" id="settings-btn" type="button">Controls</button>
+  <button class="quiet" id="settings-btn" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M2 4.5h7M12.5 4.5H14M2 11.5h1.5M7 11.5h7" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="10.7" cy="4.5" r="1.7" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="5.2" cy="11.5" r="1.7" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>Controls</button>
 </div>
 
 <section id="shelf-panel" class="dropdown" aria-label="Records">
@@ -359,11 +376,11 @@
 </aside>
 
 <footer id="bottom-right" class="corner">
-  <button class="quiet active" data-view="overview" type="button">Overview</button>
-  <button class="quiet" data-view="stylus" type="button">Needle</button>
-  <button class="quiet view-extra" data-view="profile" type="button">Side</button>
-  <button class="quiet view-extra" data-view="top" type="button">Top</button>
-  <a class="quiet" href="https://github.com/rauchg/vinyl" target="_blank" rel="noopener">Source</a>
+  <button class="quiet active" data-view="overview" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M2.5 6V3.5H5M11 3.5h2.5V6M13.5 10v2.5H11M5 12.5H2.5V10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>Overview</button>
+  <button class="quiet" data-view="stylus" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="8" cy="8" r="4.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M8 1.5v3M8 11.5v3M1.5 8h3M11.5 8h3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>Needle</button>
+  <button class="quiet view-extra" data-view="profile" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1.5 11.5h13M3.5 11.5v-3h9v3M5 8.5V7h6v1.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>Side</button>
+  <button class="quiet view-extra" data-view="top" type="button"><svg class="ic" width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="8" cy="8" r="5.8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="8" cy="8" r="1.2"/></svg>Top</button>
+  <a class="quiet" href="https://github.com/codepawl/vinyl-67js" target="_blank" rel="noopener"><svg class="ic" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>Source</a>
 </footer>
 
 <div id="toast" role="status"></div>
