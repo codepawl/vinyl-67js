@@ -546,6 +546,14 @@ function renderPixelRatio() {
   return Math.min(2, Math.max(1.25, window.devicePixelRatio || 1));
 }
 
+// How far a record is lifted off the spindle and how far it is carried aside when it is changed, metres.
+const DISC_SWAP_RISE = 0.045;
+const DISC_SWAP_TRAVEL = 1.1;
+
+function smoothStep(amount) {
+  return amount * amount * (3 - 2 * amount);
+}
+
 export class TurntableRenderer67 {
   constructor(canvas, options = {}) {
     this.canvas = canvas;
@@ -833,6 +841,33 @@ export class TurntableRenderer67 {
     updatePartVertices(stage.renderer, stage.discPart, positions, stage.discPart.geometry.normals);
   }
 
+  // --- Changing the record -------------------------------------------------------------------------------
+  hasDisc() {
+    return !!(this.stage && this.stage.discPart);
+  }
+
+  // 0 = the disc sits on the platter, 1 = it has been carried out of the picture.
+  setDiscSwap(amount) {
+    if (amount > 0 && !(this.discSwapAmount > 0) && this.camBasis) {
+      // The disc leaves towards the right of the picture as it stands when the hand takes it.
+      this.discSwapDirection = [this.camBasis.rx, 0, this.camBasis.rz];
+    }
+    this.discSwapAmount = Math.max(0, Math.min(1, amount));
+  }
+
+  // The disc first rises clear of the spindle, then travels sideways while it keeps rising a little.
+  liftedDiscMatrix(spin) {
+    const amount = this.discSwapAmount;
+    const rise = smoothStep(Math.min(1, amount / 0.3));
+    const travel = smoothStep(Math.max(0, (amount - 0.2) / 0.8));
+    const direction = this.discSwapDirection || [1, 0, 0];
+    const matrix = new Float32Array(spin);
+    matrix[12] += direction[0] * travel * DISC_SWAP_TRAVEL;
+    matrix[13] += rise * DISC_SWAP_RISE + travel * DISC_SWAP_RISE;
+    matrix[14] += direction[2] * travel * DISC_SWAP_TRAVEL;
+    return matrix;
+  }
+
   // --- Motion --------------------------------------------------------------------------------------------
   // Radius of the stylus from the spindle that the engine's arm angle stands for.
   static radiusOfAlpha(alpha) {
@@ -872,7 +907,7 @@ export class TurntableRenderer67 {
     } else {
       const spin = rotationAbout(AXIS_UP, platterAngle, [0, 0, 0]);
       for (const groupName of stage.definition.spin) this.setGroupMatrix(groupName, spin);
-      this.setGroupMatrix('disc', spin);
+      this.setGroupMatrix('disc', this.discSwapAmount > 0 ? this.liftedDiscMatrix(spin) : spin);
 
       const arm = stage.arm;
       const parkedFrom = R_DISC + 0.002;

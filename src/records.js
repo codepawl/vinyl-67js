@@ -43,6 +43,7 @@ export const PLAYERS = [
 export const RECORDS = [
   {
     id: 'rhapsody',
+    gainDb: 1,
     title: 'Rhapsody in Blue (1924)',
     by: 'Gershwin',
     year: '1924',
@@ -86,6 +87,7 @@ export const RECORDS = [
   },
   {
     id: 'gymnopedie',
+    gainDb: 9,
     title: 'Gymnopédie No. 1',
     by: 'Erik Satie',
     year: '1888',
@@ -99,6 +101,7 @@ export const RECORDS = [
   },
   {
     id: 'nocturne',
+    gainDb: 3,
     title: 'Nocturne Op. 9 No. 2',
     by: 'Chopin',
     year: '1832',
@@ -112,6 +115,7 @@ export const RECORDS = [
   },
   {
     id: 'clair-de-lune',
+    gainDb: 5,
     title: 'Clair de lune',
     by: 'Debussy',
     year: '1905',
@@ -125,6 +129,7 @@ export const RECORDS = [
   },
   {
     id: 'moonlight',
+    gainDb: 9,
     title: 'Moonlight Sonata',
     by: 'Beethoven',
     year: '1801',

@@ -47,6 +47,9 @@ let actx = null;
 let node = null;
 let localEng = new Engine(48000);
 let eraFilterChain = null;
+// Quiet recordings (a solo piano at -26 LUFS) are brought up to the level of the loud ones, as a listener
+// would with the volume knob. The limiter after it keeps the peaks in range.
+let recordGainNode = null;
 let currentRawWallIn = null;
 let currentRawWallOut = null;
 let currentRec = null;
@@ -94,11 +97,16 @@ function showToast(msg, ms = 2200) {
 }
 
 // --- Status Pill Icon + Text (distinct shape + color per state) ---
+let statusPillShown = '';
 function updateStatusPill() {
   const icon = $('status-icon');
   const text = $('status-text');
   const eq = $('now-eq');
   const playing = ui.motor && !tel.cueUp && tel.r <= R_LEADIN + 0.004 && tel.r >= R_LOCK - 0.004;
+  // This runs every frame; the page is only touched when the state it shows has changed.
+  const shown = playing ? `playing ${effectiveRpm().toFixed(1)}` : ui.motor ? 'spinning' : 'stopped';
+  if (shown === statusPillShown) return;
+  statusPillShown = shown;
   eq.classList.toggle('playing', playing);
 
   if (playing) {
@@ -201,6 +209,9 @@ async function ensureAudio() {
   const AC = window.AudioContext || window.webkitAudioContext;
   actx = new AC({ latencyHint: 'interactive' });
   eraFilterChain = buildEraFilterChain(actx);
+  recordGainNode = actx.createGain();
+  recordGainNode.connect(eraFilterChain.input);
+  applyRecordGain();
   // Safety limiter: a skipping needle or a bad record must never reach the speakers above full scale.
   const limiter = actx.createDynamicsCompressor();
   limiter.threshold.value = -6;
@@ -234,7 +245,7 @@ async function ensureAudio() {
           else if (e.data.w) wallBuf = e.data.w;
         }
       };
-      node.connect(eraFilterChain.input);
+      node.connect(recordGainNode);
       node.port.postMessage({ t: 'view', on: true });
       if (currentRec) sendRecordToWorklet(currentRec);
       post({ t: 'set', o: { stylus: ui.stylus, vtf: ui.vtf, antiskate: ui.antiskate, volume: ui.volume, hum: ui.hum } });
@@ -257,7 +268,7 @@ async function ensureAudio() {
         tel = { ...localEng.telemetry(), cpu: dt, vtf: ui.vtf, antiskate: ui.antiskate, rpm: effectiveRpm() };
         wallBuf = localEng.grooveView(5, 160, 400);
       };
-      sp.connect(eraFilterChain.input);
+      sp.connect(recordGainNode);
     }
     if (actx.state === 'suspended') await actx.resume();
   })();
@@ -335,8 +346,15 @@ function applyRecord(rec, vis, meta, saveCleanWalls = true) {
   localEng.setRecord(currentRec);
   sendRecordToWorklet(currentRec);
   renderer.setRecord(currentRec, currentVis, currentMeta);
+  applyRecordGain();
   $('now-title').textContent = currentMeta.title;
   $('now-dot').style.background = currentMeta.labelColor || currentMeta.color || '#7c1f22';
+}
+
+function applyRecordGain() {
+  if (!recordGainNode) return;
+  const gainDb = (currentMeta && currentMeta.gainDb) || 0;
+  recordGainNode.gain.setTargetAtTime(10 ** (gainDb / 20), actx.currentTime, 0.05);
 }
 
 function repress() {
@@ -483,6 +501,101 @@ function buildQuickDemoRecord() {
   return { rec, vis: makeVis(rec) };
 }
 
+function pause(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+// Waits for the machine to reach a state, and gives up after a while so a change can never hang.
+async function waitUntil(isReached, timeoutMilliseconds) {
+  const deadline = performance.now() + timeoutMilliseconds;
+  while (!isReached() && performance.now() < deadline) await pause(40);
+}
+
+// Moves the disc between the platter (0) and out of the picture (1).
+function animateDiscSwap(from, to, milliseconds) {
+  return new Promise((resolve) => {
+    const startedAt = performance.now();
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      renderer.setDiscSwap(to);
+      resolve();
+    };
+    const step = () => {
+      if (finished) return;
+      const progress = Math.min(1, (performance.now() - startedAt) / milliseconds);
+      renderer.setDiscSwap(from + (to - from) * progress);
+      if (progress >= 1) finish();
+      else requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+    // A hidden tab stops drawing; the change still has to end.
+    setTimeout(finish, milliseconds + 120);
+  });
+}
+
+// A record is changed the way a hand does it: the arm goes back to its rest, the platter stops, the old
+// disc comes off, and only then does the new one go on. Clicks made meanwhile replace the record that is
+// about to go on instead of starting a second change.
+let queuedRecordChange = null;
+let recordChangeRunning = false;
+let discSwapAmount = 0;
+
+async function changeRecord(item, autoPlay) {
+  queuedRecordChange = { item, autoPlay };
+  activeRecId = item.id;
+  for (const el of document.querySelectorAll('.rec-item')) {
+    el.classList.toggle('active', el.dataset.id === item.id);
+  }
+  $('now-title').textContent = `${item.title}…`;
+  $('now-dot').style.background = item.labelColor || '#7c1f22';
+  if (recordChangeRunning) return;
+  recordChangeRunning = true;
+  try {
+    while (queuedRecordChange) await runRecordChange();
+  } finally {
+    recordChangeRunning = false;
+  }
+}
+
+async function runRecordChange() {
+  const armIsParked = () => tel.al >= ALPHA_REST - 0.02;
+  if (!armIsParked() || !tel.cueUp) {
+    ui.cueUp = true;
+    post({ t: 'cueTo', al: ALPHA_REST });
+    syncSettingsUI();
+    await waitUntil(armIsParked, 3500);
+  }
+  if (ui.motor) {
+    ui.motor = false;
+    post({ t: 'motor', on: false });
+    syncSettingsUI();
+    updateStatusPill();
+    await waitUntil(() => Math.abs(tel.wp || 0) < 1.2, 1400);
+  }
+
+  if (renderer.hasDisc()) {
+    await animateDiscSwap(discSwapAmount, 1, 650 * (1 - discSwapAmount) + 50);
+    discSwapAmount = 1;
+  } else {
+    // The phonograph has no disc to carry away; the needle carrier stays lifted for a moment instead.
+    await pause(450);
+  }
+
+  // Whatever was asked for last is the record that goes on.
+  const request = queuedRecordChange;
+  queuedRecordChange = null;
+  await selectRecord(request.item, false);
+  if (queuedRecordChange) return;
+
+  if (renderer.hasDisc()) {
+    await animateDiscSwap(1, 0, 700);
+    discSwapAmount = 0;
+  }
+  if (request.autoPlay && !queuedRecordChange) await startPlayback();
+}
+
 let loadSeq = 0;
 async function selectRecord(item, autoPlay = false) {
   const mySeq = ++loadSeq;
@@ -540,7 +653,7 @@ async function selectRecord(item, autoPlay = false) {
 function cycleRecord(step = 1) {
   const idx = RECORDS.findIndex((r) => r.id === activeRecId);
   const nextIdx = (idx + step + RECORDS.length) % RECORDS.length;
-  selectRecord(RECORDS[nextIdx], ui.motor);
+  changeRecord(RECORDS[nextIdx], ui.motor);
 }
 
 // --- Deck Control Actions ---
@@ -1102,7 +1215,7 @@ function buildShelfUI() {
     `;
     btn.addEventListener('click', () => {
       closeDropdowns();
-      selectRecord(item, true);
+      changeRecord(item, true);
     });
     list.appendChild(btn);
   }
@@ -1330,7 +1443,13 @@ function drawScope() {
   sctx.fill();
 }
 
+// The readout is text; ten updates a second read the same as one per frame and cost a tenth of the layout.
+const HUD_INTERVAL_MILLISECONDS = 100;
+let hudUpdatedAt = 0;
 function updateHUD() {
+  const now = performance.now();
+  if (now - hudUpdatedAt < HUD_INTERVAL_MILLISECONDS) return;
+  hudUpdatedAt = now;
   const rpm = tel.wp * 60 / TAU;
   $('t-rpm').textContent = `${rpm.toFixed(1)} rpm`;
   $('t-vg').textContent = `${tel.vg.toFixed(2)} m/s`;
@@ -1403,3 +1522,9 @@ const requestedPlayer = new URLSearchParams(location.search).get('player');
 if (PLAYERS.some((player) => player.id === requestedPlayer)) setPlayerEra(requestedPlayer);
 
 window.addEventListener('resize', () => { hoverCardShown.width = 0; });
+
+// Test hooks: a muted check plays every record and reads the machine's state through these.
+window.vinylDebug.records = RECORDS;
+window.vinylDebug.changeRecord = changeRecord;
+window.vinylDebug.telemetry = () => tel;
+window.vinylDebug.recordChangeRunning = () => recordChangeRunning;
