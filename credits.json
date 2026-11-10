@@ -1,0 +1,31 @@
+{
+  "models": [
+    {
+      "player": "direct-drive-1979",
+      "title": "Technics SL-1200 MK2",
+      "author": "igorharmendani",
+      "licence": "CC BY 4.0",
+      "url": "https://sketchfab.com/3d-models/7b0f81b82f474f51a382eaa8dd822c4b",
+      "changes": "Split into moving parts, rescaled to the 12 inch record."
+    },
+    {
+      "player": "gramophone-1925",
+      "title": "Patefon Gramophone",
+      "author": "wojciechmiedziocha",
+      "licence": "CC BY 4.0",
+      "url": "https://sketchfab.com/3d-models/23402b8258c349bb81b3170be01fa98f",
+      "changes": "Split into moving parts, rescaled, tonearm tube lengthened 25 % so the needle reaches the inner groove."
+    },
+    {
+      "player": "phonograph-1877",
+      "title": "Phonograph",
+      "author": "arloopa",
+      "licence": "CC BY 4.0",
+      "url": "https://sketchfab.com/3d-models/phonograph-dd6b789d84a6414d906c00fe8f8c1a9f",
+      "changes": "Split into moving parts, rescaled."
+    }
+  ],
+  "code": [
+    { "title": "rauchg/vinyl", "licence": "MIT", "url": "https://github.com/rauchg/vinyl", "use": "Sound engine, record cutting, records" }
+  ]
+}

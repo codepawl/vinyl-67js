@@ -1,0 +1,14 @@
+{
+  "source": "../../sourced/raw/dd6b789d84a6414d906c00fe8f8c1a9f.glb",
+  "output": "../../assets/models/phonograph-1877.glb",
+  "scale": 1.6,
+  "origin": [0.0, 0.0, 0.0],
+  "keepBox": [[-0.2, -0.2, -0.01], [0.2, 0.1, 0.15]],
+  "defaultGroup": "ph_body",
+  "groups": [
+    { "name": "ph_drum", "rules": [{ "sourceNames": ["pCylinder18"] }] },
+    { "name": "ph_shaft", "rules": [{ "sourceNames": ["pCylinder5"] }] },
+    { "name": "ph_horn", "rules": [{ "sourceNames": ["sweep2"] }] },
+    { "name": "ph_support", "rules": [{ "sourceNames": ["pCube2"] }] }
+  ]
+}

@@ -1,0 +1,13 @@
+# Heavy folders live outside the repository and are served from the live site.
+/67js
+/assets
+/records
+/renders
+/dist
+/sourced
+/notes
+.wrangler/
+node_modules/
+.env
+.env.*
+*.log

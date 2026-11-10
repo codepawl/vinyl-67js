@@ -1,0 +1,13 @@
+{
+  "name": "vinyl-67js",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Interactive 3D physical record player across 3 eras (1877 Phonograph, 1925 Gramophone, 1979 Direct-Drive) built with 67js PBR and real-time groove-stylus physics.",
+  "scripts": {
+    "start": "node serve.mjs",
+    "dev": "node serve.mjs",
+    "build": "node build-dist.mjs",
+    "deploy": "node build-dist.mjs && npx wrangler deploy -c wrangler.jsonc"
+  }
+}

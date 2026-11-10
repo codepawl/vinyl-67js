@@ -1,0 +1,14 @@
+{
+  "name": "vinyl-codepawl",
+  "compatibility_date": "2026-10-15",
+  "workers_dev": true,
+  "routes": [
+    {
+      "pattern": "vinyl.codepawl.com",
+      "custom_domain": true
+    }
+  ],
+  "assets": {
+    "directory": "./dist"
+  }
+}

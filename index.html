@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en" data-tone="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Vinyl: three record players, 1877 to 1979</title>
+<link rel="icon" type="image/svg+xml" href="./favicon.svg">
+<meta name="description" content="Play a tinfoil phonograph, a horn gramophone and a direct-drive turntable in 3D. The sound is simulated from the groove up.">
+<style>
+  :root {
+    --page: #0d0806;
+    --ink: rgba(244, 242, 236, 0.94);
+    --ink-soft: rgba(244, 242, 236, 0.62);
+    --ink-faint: rgba(244, 242, 236, 0.4);
+    --fill: rgba(244, 242, 236, 0.1);
+    --fill-strong: rgba(244, 242, 236, 0.16);
+    --panel: rgba(16, 17, 20, 0.86);
+    --panel-ink: rgba(244, 242, 236, 0.94);
+    --panel-soft: rgba(244, 242, 236, 0.6);
+    --panel-fill: rgba(244, 242, 236, 0.09);
+    --accent: #f2b25c;
+    --good: #5fd08a;
+    --bad: #ff7a61;
+    --edge: 20px;
+    --sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
+  }
+  html[data-tone="light"] {
+    --ink: rgba(18, 19, 22, 0.92);
+    --ink-soft: rgba(18, 19, 22, 0.62);
+    --ink-faint: rgba(18, 19, 22, 0.42);
+    --fill: rgba(18, 19, 22, 0.08);
+    --fill-strong: rgba(18, 19, 22, 0.14);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--page);
+    color: var(--ink);
+    font: 13px/1.4 var(--sans);
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+    -webkit-user-select: none;
+    transition: background 0.4s ease;
+  }
+  button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+  a { color: inherit; text-decoration: none; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+
+  #gl, #hover-canvas, #leader-svg { position: fixed; inset: 0; width: 100%; height: 100%; }
+  #gl { cursor: grab; touch-action: none; }
+  #gl.dragging { cursor: grabbing; }
+  #gl.hover-part { cursor: pointer; }
+  #hover-canvas, #leader-svg { pointer-events: none; }
+  #leader-svg { opacity: 0; transition: opacity 0.12s ease; }
+  #leader-svg.on { opacity: 1; }
+
+  /* Corner text buttons */
+  .quiet {
+    display: inline-flex; align-items: center; gap: 7px;
+    height: 30px; padding: 0 10px; border-radius: 8px;
+    color: var(--ink-soft); white-space: nowrap;
+    transition: color 0.15s ease, background 0.15s ease;
+  }
+  .quiet:hover { color: var(--ink); background: var(--fill); }
+  .quiet.active, .quiet.open { color: var(--ink); background: var(--fill-strong); }
+
+  .corner { position: fixed; display: flex; align-items: center; gap: 2px; z-index: 5; }
+  #top-left { top: calc(var(--edge) - 4px); left: calc(var(--edge) - 10px); }
+  #top-right { top: calc(var(--edge) - 4px); right: calc(var(--edge) - 10px); }
+  #bottom-right { bottom: calc(var(--edge) - 4px); right: calc(var(--edge) - 10px); }
+  #era-tabs { top: calc(var(--edge) - 4px); left: 50%; transform: translateX(-50%); }
+
+  #status { display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 10px; color: var(--ink); }
+  #status-icon { width: 14px; height: 14px; flex: none; }
+
+  .era-tab { height: 30px; padding: 0 12px; border-radius: 8px; color: var(--ink-soft); display: inline-flex; align-items: baseline; gap: 7px; white-space: nowrap; transition: color 0.15s ease, background 0.15s ease; }
+  .era-tab .yr { font: 500 12px/30px var(--mono); font-variant-numeric: tabular-nums; }
+  .era-tab:hover { color: var(--ink); background: var(--fill); }
+  .era-tab.active { color: var(--ink); background: var(--fill-strong); }
+
+  #now-btn { max-width: 300px; }
+  #now-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; box-shadow: inset 0 0 0 3px rgba(0, 0, 0, 0.35); }
+  #now-title { overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
+  #now-time { font: 12px var(--mono); font-variant-numeric: tabular-nums; color: var(--ink-soft); }
+  .eq { display: none; align-items: flex-end; gap: 2px; height: 11px; }
+  .eq.playing { display: inline-flex; }
+  .eq i { width: 2px; background: var(--accent); border-radius: 1px; animation: eq 0.9s ease-in-out infinite; }
+  .eq i:nth-child(1) { height: 5px; animation-delay: -0.2s; }
+  .eq i:nth-child(2) { height: 11px; animation-delay: -0.5s; }
+  .eq i:nth-child(3) { height: 7px; }
+  @keyframes eq { 0%, 100% { transform: scaleY(0.35); } 50% { transform: scaleY(1); } }
+  .eq i { transform-origin: bottom; }
+
+  /* Panels that open from the top right */
+  .dropdown {
+    position: fixed; top: 58px; right: var(--edge); z-index: 8;
+    width: min(360px, calc(100vw - 2 * var(--edge)));
+    max-height: calc(100dvh - 78px - var(--edge));
+    overflow: auto; padding: 14px;
+    background: var(--panel); color: var(--panel-ink);
+    border-radius: 14px; backdrop-filter: blur(18px) saturate(1.2);
+    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+    opacity: 0; transform: translateY(-6px); pointer-events: none;
+    transition: opacity 0.16s ease, transform 0.16s ease;
+  }
+  .dropdown.open { opacity: 1; transform: none; pointer-events: auto; }
+  .dropdown h2 { margin: 0 0 10px; font: 600 13px var(--sans); display: flex; justify-content: space-between; align-items: center; }
+  .dropdown h2 span { font-weight: 400; color: var(--panel-soft); }
+
+  .rec-item { display: grid; grid-template-columns: 28px 1fr auto; align-items: center; gap: 10px; width: 100%; padding: 8px; border-radius: 10px; text-align: left; }
+  .rec-item:hover { background: var(--panel-fill); }
+  .rec-item.active { background: rgba(244, 242, 236, 0.14); }
+  .rec-disc-icon { width: 28px; height: 28px; border-radius: 50%; background: radial-gradient(circle, #111 0 9%, var(--lc) 10% 36%, #0b0b0d 37% 100%); }
+  .rec-meta { min-width: 0; }
+  .rt { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rs { color: var(--panel-soft); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rec-era { font: 12px var(--mono); color: var(--panel-soft); }
+  #upload-btn { width: 100%; margin-top: 8px; height: 36px; border-radius: 10px; background: var(--panel-fill); }
+  #upload-btn:hover { background: rgba(244, 242, 236, 0.16); }
+
+  .group { display: grid; gap: 10px; padding: 12px; margin-top: 10px; border-radius: 12px; background: rgba(244, 242, 236, 0.05); }
+  .group:first-of-type { margin-top: 0; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .action { height: 36px; border-radius: 10px; background: var(--panel-fill); font-weight: 500; }
+  .action:hover { background: rgba(244, 242, 236, 0.16); }
+  .action.on { background: var(--accent); color: #1b1408; }
+  .row { display: grid; grid-template-columns: 112px 1fr; align-items: center; gap: 10px; }
+  .row > .lbl, .slider label { color: var(--panel-soft); }
+  .strip { display: flex; gap: 2px; flex-wrap: wrap; }
+  .mini-tab { height: 28px; padding: 0 9px; border-radius: 7px; color: var(--panel-soft); }
+  .mini-tab:hover { color: var(--panel-ink); background: var(--panel-fill); }
+  .mini-tab.on { color: var(--panel-ink); background: rgba(244, 242, 236, 0.15); }
+  .slider { display: grid; grid-template-columns: 112px 1fr 58px; align-items: center; gap: 10px; }
+  .slider .val { font: 12px var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
+  input[type="range"] { -webkit-appearance: none; appearance: none; width: 100%; height: 18px; background: none; margin: 0; }
+  input[type="range"]::-webkit-slider-runnable-track { height: 3px; border-radius: 2px; background: rgba(244, 242, 236, 0.22); }
+  input[type="range"]::-moz-range-track { height: 3px; border-radius: 2px; background: rgba(244, 242, 236, 0.22); }
+  input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; margin-top: -5.5px; border-radius: 50%; background: #f4f2ec; }
+  input[type="range"]::-moz-range-thumb { width: 14px; height: 14px; border: 0; border-radius: 50%; background: #f4f2ec; }
+
+  /* Specs, bottom left */
+  #hud {
+    position: fixed; left: var(--edge); bottom: var(--edge); z-index: 4;
+    width: 268px; padding: 10px 12px 11px;
+    background: var(--panel); color: var(--panel-ink);
+    border-radius: 12px; backdrop-filter: blur(14px);
+    font: 11.5px/1.5 var(--mono); font-variant-numeric: tabular-nums;
+  }
+  #scope { display: block; width: 100%; height: 44px; margin-bottom: 8px; border-radius: 6px; background: rgba(0, 0, 0, 0.35); }
+  #stats { display: grid; grid-template-columns: 1fr 1fr; column-gap: 14px; row-gap: 1px; }
+  .stat { display: flex; justify-content: space-between; gap: 8px; white-space: nowrap; }
+  .stat span:first-child { color: var(--panel-soft); }
+  #hud-toggle { display: none; }
+
+  /* Hover tooltip */
+  #hover-card {
+    position: fixed; left: 0; top: 0; z-index: 6; width: 248px; padding: 10px 12px;
+    background: var(--panel); color: var(--panel-ink); border-radius: 10px;
+    backdrop-filter: blur(14px); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+    pointer-events: none; opacity: 0; transition: opacity 0.12s ease;
+  }
+  #hover-card.on { opacity: 1; }
+  .hc-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 2px 10px; }
+  #hc-title { font-weight: 600; }
+  #hc-state { font: 11.5px var(--mono); color: var(--accent); white-space: nowrap; }
+  #hc-how { margin-top: 3px; color: var(--panel-soft); font-size: 12.5px; }
+
+  #toast {
+    position: fixed; left: 50%; bottom: 64px; transform: translate(-50%, 8px); z-index: 9;
+    padding: 8px 14px; border-radius: 999px; background: var(--panel); color: var(--panel-ink);
+    opacity: 0; pointer-events: none; transition: opacity 0.2s ease, transform 0.2s ease; white-space: nowrap;
+  }
+  #toast.on { opacity: 1; transform: translate(-50%, 0); }
+
+  #loading { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 3; display: flex; align-items: center; gap: 10px; color: var(--ink-soft); opacity: 0; pointer-events: none; transition: opacity 0.2s ease; }
+  #loading.on { opacity: 1; }
+  #loading svg { width: 16px; height: 16px; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #info-backdrop { position: fixed; inset: 0; z-index: 20; display: none; place-items: center; background: rgba(0, 0, 0, 0.55); padding: var(--edge); }
+  #info-backdrop.open { display: grid; }
+  #info-dialog { position: relative; width: min(520px, 100%); max-height: 100%; overflow: auto; padding: 22px 24px; border-radius: 16px; background: #15161a; color: var(--panel-ink); user-select: text; -webkit-user-select: text; }
+  #info-dialog h2 { margin: 0 34px 10px 0; font: 600 17px/1.3 var(--sans); }
+  #info-dialog p { margin: 0 0 10px; color: rgba(244, 242, 236, 0.78); font-size: 14px; line-height: 1.55; }
+  #info-dialog a { text-decoration: underline; text-underline-offset: 2px; }
+  #info-close { position: absolute; top: 14px; right: 14px; width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; }
+  #info-close:hover { background: var(--panel-fill); }
+
+  /* Between phone and wide desktop the record title gives way so it never runs under the era tabs. */
+  @media (max-width: 1280px) {
+    #now-btn { max-width: 210px; }
+    #now-time { display: none; }
+  }
+
+  @media (max-width: 860px) {
+    :root { --edge: 12px; }
+    #era-tabs { top: 46px; }
+    .era-tab { padding: 0 9px; }
+    .era-tab .name-long { display: none; }
+    #status-text { display: none; }
+    #now-btn { max-width: 190px; }
+    #now-time { display: none; }
+    .dropdown { top: 88px; max-height: calc(100dvh - 100px - var(--edge)); }
+    #hud { width: auto; right: auto; padding: 8px 10px; }
+    #hud #scope, #hud .extra { display: none; }
+    #stats { grid-template-columns: auto; }
+    #hud.open { width: min(268px, calc(100vw - 2 * var(--edge))); }
+    #hud.open #scope { display: block; }
+    #hud.open .extra { display: flex; }
+    #hud.open #stats { grid-template-columns: 1fr 1fr; }
+    #hud-toggle { display: block; position: absolute; inset: 0; border-radius: 12px; }
+    .view-extra { display: none; }
+    #hover-card { width: min(248px, calc(100vw - 2 * var(--edge))); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<canvas id="gl"></canvas>
+<canvas id="hover-canvas"></canvas>
+
+<svg id="leader-svg" aria-hidden="true">
+  <polyline id="leader-line" fill="none" stroke="rgba(255,255,255,0.9)" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" />
+  <circle id="leader-dot-start" r="4" fill="#ffffff" stroke="rgba(0,0,0,0.45)" stroke-width="1" />
+  <circle id="leader-dot-end" r="2.5" fill="#ffffff" />
+</svg>
+
+<div id="hover-card" role="status" aria-live="polite">
+  <div class="hc-head">
+    <span id="hc-title"></span>
+    <span id="hc-state"></span>
+  </div>
+  <div id="hc-how"></div>
+</div>
+
+<div id="loading" role="status">
+  <svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-opacity="0.25" stroke-width="2"/><path d="M14 8a6 6 0 0 0-6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+  <span>Setting up the machine</span>
+</div>
+
+<div id="top-left" class="corner">
+  <div id="status">
+    <svg id="status-icon" viewBox="0 0 16 16" fill="none"></svg>
+    <span id="status-text">Stopped</span>
+  </div>
+  <button class="quiet" id="more-btn" type="button">About</button>
+</div>
+
+<nav id="era-tabs" class="corner" aria-label="Record player by era">
+  <button class="era-tab" data-player="phonograph-1877" type="button"><span class="yr">1877</span><span>Phonograph</span></button>
+  <button class="era-tab" data-player="gramophone-1925" type="button"><span class="yr">1925</span><span>Gramophone</span></button>
+  <button class="era-tab active" data-player="direct-drive-1979" type="button"><span class="yr">1979</span><span>Direct drive</span></button>
+</nav>
+
+<div id="top-right" class="corner">
+  <button class="quiet" id="now-btn" type="button" title="Choose a record">
+    <span id="now-dot" style="background:#c84b31"></span>
+    <span class="eq" id="now-eq"><i></i><i></i><i></i></span>
+    <span id="now-title">Rhapsody in Blue (1924)</span>
+    <span id="now-time">0:00</span>
+  </button>
+  <button class="quiet" id="next-rec-btn" type="button" title="Next record" aria-label="Next record">
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M2.5 3.2v9.6L9.6 8zM11 3h2v10h-2z"/></svg>
+  </button>
+  <button class="quiet" id="settings-btn" type="button">Controls</button>
+</div>
+
+<section id="shelf-panel" class="dropdown" aria-label="Records">
+  <h2>Records <span id="shelf-count"></span></h2>
+  <div id="shelf-list"></div>
+  <input id="file-input" type="file" accept="audio/*" hidden>
+  <button id="upload-btn" type="button">Cut your own audio file</button>
+</section>
+
+<section id="settings-panel" class="dropdown" aria-label="Controls">
+  <div class="group">
+    <div class="pair">
+      <button class="action" id="ui-motor-btn" type="button">Start</button>
+      <button class="action" id="ui-cue-btn" type="button">Lower needle</button>
+    </div>
+    <div class="row">
+      <span class="lbl">Speed</span>
+      <div class="strip" id="ui-speed-tabs">
+        <button class="mini-tab on" data-rpm="33.333333" type="button">33⅓</button>
+        <button class="mini-tab" data-rpm="45" type="button">45</button>
+        <button class="mini-tab" data-rpm="78" type="button">78</button>
+      </div>
+    </div>
+    <div class="row">
+      <span class="lbl">Sound</span>
+      <div class="strip" id="ui-acoustics-tabs">
+        <button class="mini-tab on" data-acoustics="authentic" type="button">Of the era</button>
+        <button class="mini-tab" data-acoustics="direct" type="button">Clean</button>
+      </div>
+    </div>
+    <div class="slider"><label for="s-pitch">Pitch</label><input id="s-pitch" type="range" min="-8" max="8" step="0.1" value="0"><span class="val" id="v-pitch">+0.0%</span></div>
+    <div class="slider"><label for="s-vol">Volume</label><input id="s-vol" type="range" min="0" max="1.5" step="0.01" value="1"><span class="val" id="v-vol">100%</span></div>
+  </div>
+
+  <div class="group">
+    <div class="row">
+      <span class="lbl">Light</span>
+      <div class="strip" id="ui-look-tabs">
+        <button class="mini-tab on" data-look="parlour" type="button">Lamp</button>
+        <button class="mini-tab" data-look="studio" type="button">Studio</button>
+        <button class="mini-tab" data-look="daylight" type="button">Daylight</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="row">
+      <span class="lbl">Stylus</span>
+      <div class="strip" id="ui-stylus-tabs">
+        <button class="mini-tab" data-stylus="conical" type="button">Conical</button>
+        <button class="mini-tab on" data-stylus="elliptical" type="button">Elliptical</button>
+        <button class="mini-tab" data-stylus="microline" type="button">Micro-line</button>
+      </div>
+    </div>
+    <div class="slider"><label for="s-vtf">Tracking force</label><input id="s-vtf" type="range" min="0.5" max="3.5" step="0.05" value="1.8"><span class="val" id="v-vtf">1.80 g</span></div>
+    <div class="slider"><label for="s-as">Anti-skate</label><input id="s-as" type="range" min="0" max="3.5" step="0.05" value="1.8"><span class="val" id="v-as">1.80 g</span></div>
+    <div class="slider"><label for="s-hum">Mains hum</label><input id="s-hum" type="range" min="0" max="1" step="0.01" value="0"><span class="val" id="v-hum">0%</span></div>
+  </div>
+
+  <div class="group">
+    <div class="slider"><label for="s-noise">Surface noise</label><input id="s-noise" type="range" min="0" max="3" step="0.05" value="1"><span class="val" id="v-noise">1.0×</span></div>
+    <div class="slider"><label for="s-dust">Dust</label><input id="s-dust" type="range" min="0" max="3" step="0.05" value="1"><span class="val" id="v-dust">1.0×</span></div>
+    <div class="slider"><label for="s-scratch">Scratches</label><input id="s-scratch" type="range" min="0" max="8" step="1" value="0"><span class="val" id="v-scratch">0</span></div>
+    <div class="slider"><label for="s-warp">Warp</label><input id="s-warp" type="range" min="0" max="2" step="0.05" value="0.4"><span class="val" id="v-warp">0.4 mm</span></div>
+    <div class="slider"><label for="s-ecc">Off-centre hole</label><input id="s-ecc" type="range" min="0" max="0.6" step="0.02" value="0.12"><span class="val" id="v-ecc">0.12 mm</span></div>
+    <div class="pair">
+      <button class="action" id="repress-btn" type="button">Press again</button>
+      <button class="action" id="bump-btn" type="button">Knock the table</button>
+    </div>
+    <button class="mini-tab" id="reset-params-btn" type="button" style="justify-self:start">Reset all</button>
+  </div>
+</section>
+
+<aside id="hud" aria-label="Live readings">
+  <canvas id="scope" width="488" height="88"></canvas>
+  <div id="stats">
+    <div class="stat"><span>speed</span><span id="t-rpm">0.0 rpm</span></div>
+    <div class="stat"><span>radius</span><span id="t-r">172.0 mm</span></div>
+    <div class="stat extra"><span>groove</span><span id="t-vg">0.00 m/s</span></div>
+    <div class="stat extra"><span>track err</span><span id="t-err">+0.00°</span></div>
+    <div class="stat extra"><span>inner wall</span><span id="t-in">0%</span></div>
+    <div class="stat extra"><span>outer wall</span><span id="t-out">0%</span></div>
+    <div class="stat extra"><span>mistrack</span><span id="t-loss">0.00%</span></div>
+    <div class="stat extra"><span>needle z</span><span id="t-z">+5.00 mm</span></div>
+    <div class="stat extra"><span>cantilever</span><span id="t-xi">+0.0 µm</span></div>
+    <div class="stat extra"><span>DSP load</span><span id="t-cpu">0%</span></div>
+  </div>
+  <button id="hud-toggle" type="button" aria-label="Show all readings"></button>
+</aside>
+
+<footer id="bottom-right" class="corner">
+  <button class="quiet active" data-view="overview" type="button">Overview</button>
+  <button class="quiet" data-view="stylus" type="button">Needle</button>
+  <button class="quiet view-extra" data-view="profile" type="button">Side</button>
+  <button class="quiet view-extra" data-view="top" type="button">Top</button>
+  <a class="quiet" href="https://github.com/rauchg/vinyl" target="_blank" rel="noopener">Source</a>
+</footer>
+
+<div id="toast" role="status"></div>
+
+<div id="info-backdrop" role="dialog" aria-modal="true" aria-labelledby="info-title">
+  <div id="info-dialog">
+    <button id="info-close" type="button" aria-label="Close">
+      <svg width="14" height="14" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M3 3l10 10M13 3L3 13"/></svg>
+    </button>
+    <h2 id="info-title">Three record players, played from the groove up</h2>
+    <p>Nothing here plays an audio file. The music is cut into a groove, and a simulated needle, arm and pickup read it back. Hiss, crackle and skips come from the shape of the groove, as they do on a real record.</p>
+    <p>Pick a machine at the top: Edison’s tinfoil phonograph of 1877, a horn gramophone of the 1920s, or a direct-drive turntable of 1979. Then work it with your hands: crank it, drop the needle, change the record, set the speed. Hover a part to see what it does.</p>
+    <p>Sound engine and records from <a href="https://github.com/rauchg/vinyl" target="_blank" rel="noopener">rauchg/vinyl</a> (MIT). Rendered with 67js. Models, all CC BY 4.0 on Sketchfab: Technics SL-1200 MK2 by igorharmendani, Patefon Gramophone by wojciechmiedziocha, Phonograph by arloopa.</p>
+  </div>
+</div>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
