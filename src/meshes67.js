@@ -507,7 +507,8 @@ export function buildDiscPart(name, discTextureDescriptor) {
     color: [0.92, 0.92, 0.94],
     roughness: 0.20,
     metallic: 0.14,
-    anisotropy: 0.82,
+    // No anisotropy: its highlight is tied to the disc and swept the whole surface white twice a turn.
+    anisotropy: 0,
     iridescence: 0.36,
     iridescenceIOR: 1.48,
     clearcoat: 0.58,
