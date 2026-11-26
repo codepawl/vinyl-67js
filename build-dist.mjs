@@ -11,11 +11,11 @@ function splitLargeFlac(dirRel) {
   const part1Path = path.join(root, dirRel, 'record.flac.part1');
   if (fs.existsSync(part0Path) && fs.existsSync(part1Path)) return;
   if (!fs.existsSync(flacPath)) return;
-  const buf = fs.readFileSync(flacPath);
-  const mid = Math.ceil(buf.byteLength / 2);
-  fs.writeFileSync(part0Path, buf.subarray(0, mid));
-  fs.writeFileSync(part1Path, buf.subarray(mid));
-  console.log(`Split ${dirRel}/record.flac (${buf.byteLength} bytes) into 2 parts`);
+  const bytes = fs.readFileSync(flacPath);
+  const mid = Math.ceil(bytes.byteLength / 2);
+  fs.writeFileSync(part0Path, bytes.subarray(0, mid));
+  fs.writeFileSync(part1Path, bytes.subarray(mid));
+  console.log(`Split ${dirRel}/record.flac (${bytes.byteLength} bytes) into 2 parts`);
 }
 
 function copyTree(src, dst, filterFn = () => true) {
@@ -43,6 +43,8 @@ for (const entry of fs.readdirSync(distDir)) {
 
 fs.copyFileSync(path.join(root, 'index.html'), path.join(distDir, 'index.html'));
 fs.copyFileSync(path.join(root, 'favicon.svg'), path.join(distDir, 'favicon.svg'));
+fs.copyFileSync(path.join(root, 'favicon.ico'), path.join(distDir, 'favicon.ico'));
+fs.copyFileSync(path.join(root, 'apple-touch-icon.png'), path.join(distDir, 'apple-touch-icon.png'));
 copyTree(path.join(root, 'src'), path.join(distDir, 'src'));
 copyTree(path.join(root, '67js'), path.join(distDir, '67js'));
 copyTree(path.join(root, 'records'), path.join(distDir, 'records'));
