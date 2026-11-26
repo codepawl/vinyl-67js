@@ -28,11 +28,11 @@ The folders `67js`, `assets`, `records`, `renders` and `dist` are not in this re
   <sub>Made by CodePawl, an independent 3D studio in Vietnam.</sub>
   <br>
   <sub>
-    <a href="https://codepawl.com">Website</a> ·
-    <a href="https://x.com/codepawl">X</a> ·
-    <a href="https://github.com/codepawl">GitHub</a> ·
-    <a href="https://huggingface.co/codepawl">Hugging Face</a> ·
-    <a href="https://www.youtube.com/@codepawlhq">YouTube</a> ·
+    <a href="https://codepawl.com">Website</a> |
+    <a href="https://x.com/codepawl">X</a> |
+    <a href="https://github.com/codepawl">GitHub</a> |
+    <a href="https://huggingface.co/codepawl">Hugging Face</a> |
+    <a href="https://www.youtube.com/@codepawlhq">YouTube</a> |
     <a href="https://www.threads.com/@codepawl">Threads</a>
   </sub>
 </p>
